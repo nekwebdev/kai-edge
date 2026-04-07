@@ -27,7 +27,8 @@ it does not manage:
 │   └── systemd
 │       └── kai-edge.service.tmpl
 ├── scripts
-│   └── kai-audio-check.sh
+│   ├── kai-audio-check.sh
+│   └── kai-doctor.sh
 └── README.md
 ```
 
@@ -38,6 +39,7 @@ it does not manage:
 - `files/ssh/60-kai-hardening.conf`: managed openssh hardening snippet
 - `files/systemd/kai-edge.service.tmpl`: placeholder systemd unit template for the future pi-side edge service
 - `scripts/kai-audio-check.sh`: simple alsa validation helper that gets installed to `/opt/kai/bin/kai-audio-check`
+- `scripts/kai-doctor.sh`: post-bootstrap readiness helper that gets installed to `/opt/kai/bin/kai-doctor`
 - `README.md`: operator notes, scope, and expected workflow
 
 ## managed paths on the pi
@@ -48,6 +50,8 @@ it does not manage:
 - `/var/log/kai`: optional log location for pi-side components
 - `/etc/ssh/sshd_config.d/60-kai-hardening.conf`: conservative ssh hardening
 - `/etc/systemd/system/kai-edge.service`: placeholder unit, installed but not enabled
+- `/etc/kai/bootstrap.env`: managed bootstrap state used by `kai-doctor`
+- `/opt/kai/bin/kai-doctor`: post-bootstrap validation helper
 
 ## bootstrap behavior
 
@@ -64,6 +68,8 @@ it does not manage:
 - optionally enables `avahi-daemon` for `kai.local`
 - installs a placeholder `kai-edge.service`
 - installs the audio helper
+- writes `/etc/kai/bootstrap.env` so `kai-doctor` can validate the configured node shape
+- installs the `kai-doctor` validation helper
 - prints a short summary with manual follow-up
 
 safe re-runs are handled by comparing managed files before replacing them and by using `mkdir`-style directory setup instead of destructive resets.
@@ -117,9 +123,28 @@ sudo ./bootstrap.sh
 
 the script provisions the host it is executed on. it is fine to run it over ssh, but verify you still have another working ssh path before closing your current session after ssh-related changes.
 
+## post-bootstrap validation
+
+run this after bootstrap finishes:
+
+```bash
+sudo /opt/kai/bin/kai-doctor
+```
+
+`kai-doctor` is a lightweight readiness check for the pi. it confirms that the expected directories and commands exist, validates `sshd -t`, checks for the managed ssh snippet, reports tailscale daemon and auth state, verifies tailscale ssh from `tailscale debug prefs`, checks `avahi-daemon` when it is enabled, confirms the placeholder `kai-edge.service` unit is present, verifies the python venv, and reports whether alsa playback and capture devices are currently visible.
+
+the output is intentionally simple:
+
+- `ok` for checks that match the expected bootstrap state
+- `warn` for operator follow-up or optional hardware visibility issues
+- `fail` for important readiness gaps such as missing directories, missing commands, invalid ssh config, missing unit files, or inactive required services
+
+the script exits `0` when there are no `fail` lines and exits `1` when one or more important checks fail.
+
 ## next steps after v1
 
 - replace the placeholder `ExecStart` target with the actual pi-side service launcher
 - add a real `EnvironmentFile` under `/etc/kai/edge.env` when the service shape settles
 - enable and start `kai-edge.service` only after the service exists
+- run `/opt/kai/bin/kai-doctor` after bootstrap or after any readiness-related node changes
 - use `/opt/kai/bin/kai-audio-check --smoke-test` once the target microphone and speaker hardware are attached

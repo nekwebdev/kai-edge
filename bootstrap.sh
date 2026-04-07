@@ -91,6 +91,8 @@ load_config() {
   SSH_SNIPPET_DEST="/etc/ssh/sshd_config.d/60-kai-hardening.conf"
   SYSTEMD_UNIT_DEST="/etc/systemd/system/kai-edge.service"
   AUDIO_HELPER_DEST="$KAI_BIN_DIR/kai-audio-check"
+  DOCTOR_HELPER_DEST="$KAI_BIN_DIR/kai-doctor"
+  DOCTOR_CONFIG_DEST="/etc/kai/bootstrap.env"
 }
 
 ensure_dir() {
@@ -409,9 +411,43 @@ install_audio_helper() {
   fi
 }
 
+render_doctor_config() {
+  local output=$1
+
+  {
+    printf '%s\n' '# managed by kai-edge bootstrap'
+    printf 'KAI_ROOT=%q\n' "$KAI_ROOT"
+    printf 'KAI_CONFIG_DIR=%q\n' "$KAI_CONFIG_DIR"
+    printf 'KAI_STATE_DIR=%q\n' "$KAI_STATE_DIR"
+    printf 'KAI_LOG_DIR=%q\n' "$KAI_LOG_DIR"
+    printf 'KAI_VENV_DIR=%q\n' "$VENV_DIR"
+    printf 'CREATE_VENV=%q\n' "$CREATE_VENV"
+    printf 'INSTALL_AVAHI=%q\n' "$INSTALL_AVAHI"
+    printf 'SSH_SNIPPET=%q\n' "$SSH_SNIPPET_DEST"
+    printf 'SYSTEMD_UNIT=%q\n' "$SYSTEMD_UNIT_DEST"
+  } > "$output"
+}
+
+install_doctor_config() {
+  local rendered="$TMP_DIR/bootstrap.env"
+  render_doctor_config "$rendered"
+  if install_managed_file "$rendered" "$DOCTOR_CONFIG_DEST" 0644 root root; then
+    :
+  fi
+}
+
+install_doctor_helper() {
+  local src="$SCRIPT_DIR/scripts/kai-doctor.sh"
+  [[ -f "$src" ]] || die "missing doctor helper: $src"
+  if install_managed_file "$src" "$DOCTOR_HELPER_DEST" 0755 "$KAI_USER" "$KAI_GROUP"; then
+    :
+  fi
+}
+
 prepare_manual_follow_up() {
   note_manual "replace $KAI_APP_DIR/run-edge-service with the real pi-side launcher, then enable kai-edge.service when ready"
   note_manual "review $SSH_SNIPPET_DEST before making stronger ssh changes that could affect your access path"
+  note_manual "run sudo $DOCTOR_HELPER_DEST after bootstrap to validate node readiness"
   note_manual "run $AUDIO_HELPER_DEST after the target microphone and speaker hardware are attached"
 
   if [[ "$INSTALL_AVAHI" == "1" ]]; then
@@ -473,6 +509,8 @@ main() {
   install_systemd_unit
   reload_systemd_if_needed
   install_audio_helper
+  install_doctor_config
+  install_doctor_helper
   print_summary
 }
 

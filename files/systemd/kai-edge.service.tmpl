@@ -1,0 +1,26 @@
+[Unit]
+Description=kai edge node service
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+# this is a placeholder for the future pi-side service
+# bootstrap installs it but does not enable it
+Type=simple
+User=__KAI_USER__
+Group=__KAI_GROUP__
+SupplementaryGroups=audio
+WorkingDirectory=__KAI_APP_DIR__
+Environment=KAI_STATE_DIR=__KAI_STATE_DIR__
+Environment=KAI_LOG_DIR=__KAI_LOG_DIR__
+EnvironmentFile=-__KAI_CONFIG_DIR__/edge.env
+ConditionPathExists=__KAI_APP_DIR__/run-edge-service
+ExecStart=__KAI_APP_DIR__/run-edge-service
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

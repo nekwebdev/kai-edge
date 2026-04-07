@@ -76,6 +76,12 @@ load_config() {
   : "${CREATE_VENV:=1}"
   : "${VENV_DIR:=$KAI_ROOT/venv}"
   : "${INSTALL_AVAHI:=1}"
+  : "${KAI_CORE_BASE_URL:=}"
+  : "${KAI_RECORD_SECONDS:=5}"
+  : "${KAI_AUDIO_SAMPLE_RATE:=16000}"
+  : "${KAI_HTTP_TIMEOUT_SECONDS:=60}"
+  : "${KAI_RECORD_DEVICE:=}"
+  : "${KAI_PLAYBACK_DEVICE:=}"
   : "${APT_PACKAGES_EXTRA:=}"
 
   if [[ -z "${KAI_USER:-}" ]]; then
@@ -92,7 +98,9 @@ load_config() {
   SYSTEMD_UNIT_DEST="/etc/systemd/system/kai-edge.service"
   AUDIO_HELPER_DEST="$KAI_BIN_DIR/kai-audio-check"
   DOCTOR_HELPER_DEST="$KAI_BIN_DIR/kai-doctor"
+  PUSH_TO_TALK_DEST="$KAI_BIN_DIR/kai-push-to-talk"
   DOCTOR_CONFIG_DEST="/etc/kai/bootstrap.env"
+  EDGE_ENV_DEST="$KAI_CONFIG_DIR/edge.env"
 }
 
 ensure_dir() {
@@ -145,6 +153,20 @@ render_systemd_unit() {
     "$template" > "$output"
 }
 
+render_edge_env() {
+  local template=$1
+  local output=$2
+
+  sed \
+    -e "s|__KAI_CORE_BASE_URL__|$(escape_sed_replacement "$KAI_CORE_BASE_URL")|g" \
+    -e "s|__KAI_RECORD_SECONDS__|$(escape_sed_replacement "$KAI_RECORD_SECONDS")|g" \
+    -e "s|__KAI_AUDIO_SAMPLE_RATE__|$(escape_sed_replacement "$KAI_AUDIO_SAMPLE_RATE")|g" \
+    -e "s|__KAI_HTTP_TIMEOUT_SECONDS__|$(escape_sed_replacement "$KAI_HTTP_TIMEOUT_SECONDS")|g" \
+    -e "s|__KAI_RECORD_DEVICE__|$(escape_sed_replacement "$KAI_RECORD_DEVICE")|g" \
+    -e "s|__KAI_PLAYBACK_DEVICE__|$(escape_sed_replacement "$KAI_PLAYBACK_DEVICE")|g" \
+    "$template" > "$output"
+}
+
 ensure_packages() {
   local packages=(
     git
@@ -180,6 +202,23 @@ ensure_packages() {
   log "ensuring baseline apt packages are installed"
   apt-get install -y --no-install-recommends "${packages[@]}"
   note_change "ran apt update and ensured baseline packages are installed"
+}
+
+ensure_group_membership() {
+  local user=$1
+  local group=$2
+
+  getent group "$group" >/dev/null 2>&1 || die "required group does not exist: $group"
+
+  if id -nG "$user" | tr ' ' '\n' | grep -Fxq "$group"; then
+    log "user already in group $group: $user"
+    return 0
+  fi
+
+  log "adding $user to group $group"
+  usermod -aG "$group" "$user"
+  note_change "added $user to group $group"
+  note_manual "start a new shell for updated group membership, or run audio commands with: sudo -u $user $PUSH_TO_TALK_DEST"
 }
 
 install_tailscale_if_missing() {
@@ -317,6 +356,10 @@ ensure_python_venv() {
   note_change "created python venv at $VENV_DIR"
 }
 
+ensure_runtime_user_access() {
+  ensure_group_membership "$KAI_USER" audio
+}
+
 validate_sshd_config() {
   local sshd_bin
   sshd_bin="$(command -v sshd || true)"
@@ -411,11 +454,33 @@ install_audio_helper() {
   fi
 }
 
+install_push_to_talk_helper() {
+  local src="$SCRIPT_DIR/scripts/kai-push-to-talk.py"
+  [[ -f "$src" ]] || die "missing push-to-talk helper: $src"
+  if install_managed_file "$src" "$PUSH_TO_TALK_DEST" 0755 "$KAI_USER" "$KAI_GROUP"; then
+    :
+  fi
+}
+
+install_edge_env() {
+  local template="$SCRIPT_DIR/files/env/edge.env.tmpl"
+  local rendered="$TMP_DIR/edge.env"
+
+  [[ -f "$template" ]] || die "missing edge env template: $template"
+
+  render_edge_env "$template" "$rendered"
+  if install_managed_file "$rendered" "$EDGE_ENV_DEST" 0644 root root; then
+    :
+  fi
+}
+
 render_doctor_config() {
   local output=$1
 
   {
     printf '%s\n' '# managed by kai-edge bootstrap'
+    printf 'KAI_USER=%q\n' "$KAI_USER"
+    printf 'KAI_GROUP=%q\n' "$KAI_GROUP"
     printf 'KAI_ROOT=%q\n' "$KAI_ROOT"
     printf 'KAI_CONFIG_DIR=%q\n' "$KAI_CONFIG_DIR"
     printf 'KAI_STATE_DIR=%q\n' "$KAI_STATE_DIR"
@@ -425,6 +490,8 @@ render_doctor_config() {
     printf 'INSTALL_AVAHI=%q\n' "$INSTALL_AVAHI"
     printf 'SSH_SNIPPET=%q\n' "$SSH_SNIPPET_DEST"
     printf 'SYSTEMD_UNIT=%q\n' "$SYSTEMD_UNIT_DEST"
+    printf 'EDGE_ENV_FILE=%q\n' "$EDGE_ENV_DEST"
+    printf 'PUSH_TO_TALK_HELPER=%q\n' "$PUSH_TO_TALK_DEST"
   } > "$output"
 }
 
@@ -449,6 +516,14 @@ prepare_manual_follow_up() {
   note_manual "review $SSH_SNIPPET_DEST before making stronger ssh changes that could affect your access path"
   note_manual "run sudo $DOCTOR_HELPER_DEST after bootstrap to validate node readiness"
   note_manual "run $AUDIO_HELPER_DEST after the target microphone and speaker hardware are attached"
+  note_manual "run sudo -u $KAI_USER $PUSH_TO_TALK_DEST for a manual one-shot record -> /audio -> playback test"
+
+  if [[ -z "$KAI_CORE_BASE_URL" ]]; then
+    note_status "kai-core base URL is not configured yet"
+    note_manual "set KAI_CORE_BASE_URL in $CONFIG_FILE and rerun bootstrap before using $PUSH_TO_TALK_DEST"
+  else
+    note_status "kai-core base URL configured for push-to-talk: $KAI_CORE_BASE_URL"
+  fi
 
   if [[ "$INSTALL_AVAHI" == "1" ]]; then
     note_manual "verify mdns reachability from the same lan with: ping kai.local or ssh $KAI_USER@kai.local"
@@ -491,12 +566,15 @@ print_summary() {
   printf -- '- %s\n' "$KAI_LOG_DIR"
   printf -- '- %s\n' "$SSH_SNIPPET_DEST"
   printf -- '- %s\n' "$SYSTEMD_UNIT_DEST"
+  printf -- '- %s\n' "$EDGE_ENV_DEST"
+  printf -- '- %s\n' "$PUSH_TO_TALK_DEST"
 }
 
 main() {
   load_config
   prepare_manual_follow_up
   ensure_packages
+  ensure_runtime_user_access
   install_tailscale_if_missing
   if ensure_tailscaled_service; then
     check_tailscale_state
@@ -509,6 +587,8 @@ main() {
   install_systemd_unit
   reload_systemd_if_needed
   install_audio_helper
+  install_push_to_talk_helper
+  install_edge_env
   install_doctor_config
   install_doctor_helper
   print_summary

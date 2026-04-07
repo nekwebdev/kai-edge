@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 DOCTOR_CONFIG_FILE="${KAI_DOCTOR_CONFIG_FILE:-/etc/kai/bootstrap.env}"
 
+KAI_USER=""
+KAI_GROUP=""
 KAI_ROOT="/opt/kai"
 KAI_CONFIG_DIR="/etc/kai"
 KAI_STATE_DIR="/var/lib/kai"
@@ -12,6 +14,8 @@ CREATE_VENV="1"
 INSTALL_AVAHI="1"
 SSH_SNIPPET="/etc/ssh/sshd_config.d/60-kai-hardening.conf"
 SYSTEMD_UNIT="/etc/systemd/system/kai-edge.service"
+EDGE_ENV_FILE="/etc/kai/edge.env"
+PUSH_TO_TALK_HELPER="/opt/kai/bin/kai-push-to-talk"
 
 ok_count=0
 warn_count=0
@@ -105,6 +109,59 @@ check_required_commands() {
   check_command ffmpeg
   check_command python3
   check_command systemctl
+  check_command arecord
+  check_command aplay
+}
+
+check_runtime_user() {
+  if [[ -z "$KAI_USER" ]]; then
+    warn "runtime user not recorded in bootstrap state"
+    return 0
+  fi
+
+  if id "$KAI_USER" >/dev/null 2>&1; then
+    ok "runtime user present: $KAI_USER"
+  else
+    fail "runtime user missing: $KAI_USER"
+    return 0
+  fi
+
+  if id -nG "$KAI_USER" | tr ' ' '\n' | grep -Fxq audio; then
+    ok "runtime user is in audio group: $KAI_USER"
+  else
+    fail "runtime user is not in audio group: $KAI_USER"
+  fi
+}
+
+check_runtime_files() {
+  local backend_url
+
+  if [[ -x "$PUSH_TO_TALK_HELPER" ]]; then
+    ok "push-to-talk helper present: $PUSH_TO_TALK_HELPER"
+  else
+    fail "push-to-talk helper missing: $PUSH_TO_TALK_HELPER"
+  fi
+
+  if [[ -f "$EDGE_ENV_FILE" ]]; then
+    ok "runtime env file present: $EDGE_ENV_FILE"
+  else
+    fail "runtime env file missing: $EDGE_ENV_FILE"
+    return 0
+  fi
+
+  backend_url="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_CORE_BASE_URL:-}"
+    ) 2>/dev/null || true
+  )"
+
+  if [[ -n "$backend_url" ]]; then
+    ok "kai-core base URL configured: $backend_url"
+  else
+    warn "kai-core base URL is blank in $EDGE_ENV_FILE"
+  fi
 }
 
 check_ssh_state() {
@@ -328,6 +385,8 @@ main() {
   load_config
   check_required_directories
   check_required_commands
+  check_runtime_user
+  check_runtime_files
   check_ssh_state
   check_tailscale_state
   check_avahi_state

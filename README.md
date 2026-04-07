@@ -74,7 +74,7 @@ bootstrap now handles the practical parts of tailscale setup:
 
 - if `tailscale` is missing, it installs it with `curl -fsSL https://tailscale.com/install.sh | sh`
 - it ensures `tailscaled` is enabled and running
-- it inspects `tailscale status --json` to decide what to print in the final summary
+- it inspects `tailscale status --json` for login state and `tailscale debug prefs` for `RunSSH`
 
 bootstrap still does not automate login or silently enable tailscale ssh.
 

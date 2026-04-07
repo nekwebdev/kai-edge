@@ -221,16 +221,23 @@ check_tailscale_state() {
   fi
 
   backend_state="$(jq -r '.BackendState // ""' <<<"$status_json")"
-  ssh_enabled="$(jq -r '((.Self.sshHostKeys // []) | length) > 0' <<<"$status_json")"
+  ssh_enabled="$(get_tailscale_ssh_enabled)"
 
   case "$backend_state" in
     Running|Starting)
-      if [[ "$ssh_enabled" == "true" ]]; then
-        note_status "tailscale is authenticated, tailscaled is running, and tailscale ssh is enabled"
-      else
-        note_status "tailscale is authenticated and tailscaled is running, but tailscale ssh is not enabled"
-        note_manual $'tailscale is authenticated, but tailscale ssh is not enabled. enable it manually when ready with:\n  sudo tailscale set --ssh'
-      fi
+      case "$ssh_enabled" in
+        true)
+          note_status "tailscale is healthy and ssh is enabled"
+          ;;
+        false)
+          note_status "tailscale is authenticated and healthy, but tailscale ssh is not enabled"
+          note_manual $'tailscale is authenticated, but tailscale ssh is not enabled. enable it manually when ready with:\n  sudo tailscale set --ssh'
+          ;;
+        *)
+          note_status "tailscale is authenticated and healthy, but bootstrap could not determine whether tailscale ssh is enabled"
+          note_manual $'inspect tailscale ssh state manually with:\n  sudo tailscale debug prefs | jq \'.RunSSH\''
+          ;;
+      esac
       ;;
     NeedsLogin)
       note_status "tailscale is installed and tailscaled is running, but this node still needs manual login"
@@ -251,6 +258,27 @@ check_tailscale_state() {
     *)
       note_status "tailscale reported backend state: $backend_state"
       note_manual "inspect tailscale manually with: sudo tailscale status"
+      ;;
+  esac
+}
+
+get_tailscale_ssh_enabled() {
+  local prefs_json run_ssh
+
+  if ! prefs_json="$(tailscale debug prefs 2>/dev/null)"; then
+    warn "could not read tailscale debug prefs"
+    printf 'unknown\n'
+    return 0
+  fi
+
+  run_ssh="$(jq -r '.RunSSH // "unknown"' <<<"$prefs_json")"
+  case "$run_ssh" in
+    true|false)
+      printf '%s\n' "$run_ssh"
+      ;;
+    *)
+      warn "tailscale debug prefs did not return a usable RunSSH value"
+      printf 'unknown\n'
       ;;
   esac
 }

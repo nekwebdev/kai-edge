@@ -1,4 +1,4 @@
-# kai-pi
+# kai-edge
 
 minimal repo for provisioning and maintaining the `kai` raspberry pi edge node.
 

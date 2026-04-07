@@ -33,6 +33,10 @@ note_manual() {
   MANUAL_ITEMS+=("$*")
 }
 
+note_status() {
+  STATUS_ITEMS+=("$*")
+}
+
 escape_sed_replacement() {
   printf '%s' "$1" | sed -e 's/[\\/&]/\\&/g'
 }
@@ -40,6 +44,7 @@ escape_sed_replacement() {
 TMP_DIR="$(mktemp -d)"
 declare -a CHANGED_ITEMS=()
 declare -a MANUAL_ITEMS=()
+declare -a STATUS_ITEMS=()
 SSH_SNIPPET_CHANGED=0
 SYSTEMD_UNIT_CHANGED=0
 
@@ -175,6 +180,81 @@ ensure_packages() {
   note_change "ran apt update and ensured baseline packages are installed"
 }
 
+install_tailscale_if_missing() {
+  if command -v tailscale >/dev/null 2>&1 && command -v tailscaled >/dev/null 2>&1; then
+    log "tailscale already installed"
+    return 0
+  fi
+
+  log "installing tailscale using the official linux install script"
+  curl -fsSL https://tailscale.com/install.sh | sh
+  note_change "installed tailscale using the official linux install script"
+}
+
+ensure_tailscaled_service() {
+  if systemctl is-enabled --quiet tailscaled && systemctl is-active --quiet tailscaled; then
+    log "tailscaled is already enabled and running"
+    return 0
+  fi
+
+  log "ensuring tailscaled is enabled and running"
+  if systemctl enable --now tailscaled; then
+    note_change "ensured tailscaled is enabled and running"
+    return 0
+  fi
+
+  warn "could not enable tailscaled automatically"
+  note_status "tailscale is installed, but bootstrap could not confirm that tailscaled is enabled and running"
+  note_manual "enable tailscaled manually with: sudo systemctl enable --now tailscaled"
+  return 1
+}
+
+check_tailscale_state() {
+  local status_json backend_state ssh_enabled
+
+  log "checking tailscale state"
+  if ! status_json="$(tailscale status --json 2>/dev/null)"; then
+    warn "could not read tailscale status"
+    note_status "tailscale is installed, but bootstrap could not determine whether the node is logged in"
+    note_manual "inspect tailscale manually with: sudo tailscale status"
+    return 0
+  fi
+
+  backend_state="$(jq -r '.BackendState // ""' <<<"$status_json")"
+  ssh_enabled="$(jq -r '((.Self.sshHostKeys // []) | length) > 0' <<<"$status_json")"
+
+  case "$backend_state" in
+    Running|Starting)
+      if [[ "$ssh_enabled" == "true" ]]; then
+        note_status "tailscale is authenticated, tailscaled is running, and tailscale ssh is enabled"
+      else
+        note_status "tailscale is authenticated and tailscaled is running, but tailscale ssh is not enabled"
+        note_manual $'tailscale is authenticated, but tailscale ssh is not enabled. enable it manually when ready with:\n  sudo tailscale set --ssh'
+      fi
+      ;;
+    NeedsLogin)
+      note_status "tailscale is installed and tailscaled is running, but this node still needs manual login"
+      note_manual $'tailscale login is required. run these commands in order, and only run the second command after login succeeds:\n  sudo tailscale up\n  sudo tailscale set --ssh'
+      ;;
+    NeedsMachineAuth)
+      note_status "tailscale login succeeded, but this node still needs tailnet admin approval"
+      note_manual $'approve the node in the tailnet admin console first. after approval, enable tailscale ssh manually with:\n  sudo tailscale set --ssh'
+      ;;
+    Stopped)
+      note_status "tailscale is installed, but the daemon reported state: stopped"
+      note_manual "start tailscaled manually with: sudo systemctl enable --now tailscaled"
+      ;;
+    "")
+      note_status "tailscale returned an empty backend state"
+      note_manual "inspect tailscale manually with: sudo tailscale status"
+      ;;
+    *)
+      note_status "tailscale reported backend state: $backend_state"
+      note_manual "inspect tailscale manually with: sudo tailscale status"
+      ;;
+  esac
+}
+
 ensure_base_directories() {
   log "ensuring base directories exist"
   ensure_dir "$KAI_ROOT" 0755 "$KAI_USER" "$KAI_GROUP"
@@ -302,7 +382,6 @@ install_audio_helper() {
 }
 
 prepare_manual_follow_up() {
-  note_manual "tailscale is assumed present; any future re-authentication remains a manual step"
   note_manual "replace $KAI_APP_DIR/run-edge-service with the real pi-side launcher, then enable kai-edge.service when ready"
   note_manual "review $SSH_SNIPPET_DEST before making stronger ssh changes that could affect your access path"
   note_manual "run $AUDIO_HELPER_DEST after the target microphone and speaker hardware are attached"
@@ -327,6 +406,15 @@ print_summary() {
     done
   fi
 
+  printf '\nstatus\n'
+  if [[ ${#STATUS_ITEMS[@]} -eq 0 ]]; then
+    printf -- '- no additional status notes\n'
+  else
+    for item in "${STATUS_ITEMS[@]}"; do
+      printf -- '- %s\n' "$item"
+    done
+  fi
+
   printf '\nmanual follow-up\n'
   for item in "${MANUAL_ITEMS[@]}"; do
     printf -- '- %s\n' "$item"
@@ -345,6 +433,10 @@ main() {
   load_config
   prepare_manual_follow_up
   ensure_packages
+  install_tailscale_if_missing
+  if ensure_tailscaled_service; then
+    check_tailscale_state
+  fi
   ensure_base_directories
   ensure_python_venv
   install_ssh_hardening

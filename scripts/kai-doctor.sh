@@ -12,6 +12,13 @@ KAI_LOG_DIR="/var/log/kai"
 KAI_VENV_DIR="/opt/kai/venv"
 CREATE_VENV="1"
 INSTALL_AVAHI="1"
+INSTALL_RASPAP="1"
+RASPAP_INSTALL_URL="https://install.raspap.com"
+RASPAP_AP_SSID="Kai-Setup"
+RASPAP_AP_SUBNET_CIDR="10.42.0.1/24"
+RASPAP_AP_DHCP_RANGE="10.42.0.50,10.42.0.150,255.255.255.0,12h"
+RASPAP_ENABLE_FALLBACK_AP="1"
+RASPAP_ADMIN_USER="admin"
 SSH_SNIPPET="/etc/ssh/sshd_config.d/60-kai-hardening.conf"
 SYSTEMD_UNIT="/etc/systemd/system/kai-edge.service"
 EDGE_ENV_FILE="/etc/kai/edge.env"
@@ -280,6 +287,96 @@ check_avahi_state() {
   esac
 }
 
+check_raspap_state() {
+  local enabled_state
+  local expected_fallback=0
+
+  if [[ "$INSTALL_RASPAP" != "1" ]]; then
+    ok "raspap disabled in bootstrap config"
+    return 0
+  fi
+
+  if [[ -d /etc/raspap ]]; then
+    ok "raspap directory present: /etc/raspap"
+  else
+    fail "raspap directory missing: /etc/raspap"
+  fi
+
+  if ! have_command systemctl; then
+    warn "skipping raspap service checks because systemctl is unavailable"
+    return 0
+  fi
+
+  enabled_state="$(systemctl is-enabled lighttpd 2>/dev/null || true)"
+  case "$enabled_state" in
+    enabled|enabled-runtime)
+      ok "raspap web service enabled (lighttpd)"
+      ;;
+    *)
+      fail "raspap web service not enabled (lighttpd)"
+      ;;
+  esac
+
+  if systemctl is-active --quiet lighttpd; then
+    ok "raspap web service active (lighttpd)"
+  else
+    fail "raspap web service not active (lighttpd)"
+  fi
+
+  if [[ -f /etc/hostapd/hostapd.conf ]]; then
+    if grep -Fqx "ssid=${RASPAP_AP_SSID}" /etc/hostapd/hostapd.conf; then
+      ok "raspap AP SSID configured: $RASPAP_AP_SSID"
+    else
+      fail "raspap AP SSID does not match expected value: $RASPAP_AP_SSID"
+    fi
+  else
+    fail "hostapd config missing: /etc/hostapd/hostapd.conf"
+  fi
+
+  if [[ -f /etc/dnsmasq.d/090_wlan0.conf ]]; then
+    if grep -Fqx "dhcp-range=${RASPAP_AP_DHCP_RANGE}" /etc/dnsmasq.d/090_wlan0.conf; then
+      ok "raspap AP DHCP range configured"
+    else
+      fail "raspap AP DHCP range does not match expected value"
+    fi
+  else
+    fail "dnsmasq config missing: /etc/dnsmasq.d/090_wlan0.conf"
+  fi
+
+  if [[ -f /etc/dhcpcd.conf ]]; then
+    if grep -Fqx "static ip_address=${RASPAP_AP_SUBNET_CIDR}" /etc/dhcpcd.conf; then
+      ok "raspap AP static subnet configured: $RASPAP_AP_SUBNET_CIDR"
+    else
+      fail "raspap AP static subnet does not match expected value: $RASPAP_AP_SUBNET_CIDR"
+    fi
+
+    if [[ "$RASPAP_ENABLE_FALLBACK_AP" == "1" ]]; then
+      expected_fallback=1
+      if grep -Fqx "fallback static_wlan0" /etc/dhcpcd.conf; then
+        ok "raspap fallback AP behavior enabled for wlan0"
+      else
+        fail "raspap fallback AP behavior expected but not configured for wlan0"
+      fi
+    fi
+
+    if [[ "$expected_fallback" != "1" ]] && grep -Fqx "fallback static_wlan0" /etc/dhcpcd.conf; then
+      warn "raspap fallback AP behavior is enabled in dhcpcd.conf but disabled in bootstrap config"
+    fi
+  else
+    fail "dhcpcd config missing: /etc/dhcpcd.conf"
+  fi
+
+  if [[ -f /etc/raspap/raspap.auth ]]; then
+    if head -n 1 /etc/raspap/raspap.auth | grep -Fqx "$RASPAP_ADMIN_USER"; then
+      ok "raspap admin user configured: $RASPAP_ADMIN_USER"
+    else
+      fail "raspap admin user in /etc/raspap/raspap.auth does not match expected value: $RASPAP_ADMIN_USER"
+    fi
+  else
+    fail "raspap auth file missing: /etc/raspap/raspap.auth"
+  fi
+}
+
 check_systemd_state() {
   local enabled_state active_state
 
@@ -390,6 +487,7 @@ main() {
   check_ssh_state
   check_tailscale_state
   check_avahi_state
+  check_raspap_state
   check_systemd_state
   check_python_venv
   check_audio_visibility

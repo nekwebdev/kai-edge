@@ -76,6 +76,17 @@ load_config() {
   : "${CREATE_VENV:=1}"
   : "${VENV_DIR:=$KAI_ROOT/venv}"
   : "${INSTALL_AVAHI:=1}"
+  : "${INSTALL_RASPAP:=1}"
+  : "${RASPAP_INSTALL_URL:=https://install.raspap.com}"
+  : "${RASPAP_INSTALL_FLAGS:=--yes --openvpn 0 --wireguard 0 --adblock 0 --rest 0 --provider 0}"
+  : "${RASPAP_AP_SSID:=Kai-Setup}"
+  : "${RASPAP_AP_PASSPHRASE:=KaiSetup12345}"
+  : "${RASPAP_AP_SUBNET_CIDR:=10.42.0.1/24}"
+  : "${RASPAP_AP_DHCP_RANGE:=10.42.0.50,10.42.0.150,255.255.255.0,12h}"
+  : "${RASPAP_AP_DNS_SERVERS:=1.1.1.1 8.8.8.8}"
+  : "${RASPAP_ENABLE_FALLBACK_AP:=1}"
+  : "${RASPAP_ADMIN_USER:=admin}"
+  : "${RASPAP_ADMIN_PASSWORD:=kai-admin-change-this}"
   : "${KAI_CORE_BASE_URL:=}"
   : "${KAI_RECORD_SECONDS:=5}"
   : "${KAI_AUDIO_SAMPLE_RATE:=16000}"
@@ -219,6 +230,238 @@ ensure_group_membership() {
   usermod -aG "$group" "$user"
   note_change "added $user to group $group"
   note_manual "start a new shell for updated group membership, or run audio commands with: sudo -u $user $PUSH_TO_TALK_DEST"
+}
+
+cidr_prefix_to_mask() {
+  local prefix=$1
+  local octet mask=""
+  local i
+
+  [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+  (( prefix >= 0 && prefix <= 32 )) || return 1
+
+  for ((i=0; i<4; i++)); do
+    if (( prefix >= 8 )); then
+      octet=255
+      prefix=$((prefix - 8))
+    elif (( prefix > 0 )); then
+      octet=$((256 - 2 ** (8 - prefix)))
+      prefix=0
+    else
+      octet=0
+    fi
+    mask+="$octet"
+    if (( i < 3 )); then
+      mask+="."
+    fi
+  done
+
+  printf '%s\n' "$mask"
+}
+
+upsert_key_value_line() {
+  local file=$1
+  local key=$2
+  local value=$3
+  local escaped_value
+
+  escaped_value="$(escape_sed_replacement "$value")"
+  if grep -Eq "^${key}=" "$file"; then
+    sed -i -E "s|^${key}=.*|${key}=${escaped_value}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+replace_raspap_dhcpcd_wlan0_block() {
+  local source_file=$1
+  local block_file=$2
+  local output_file=$3
+
+  awk -v block_file="$block_file" '
+    function emit_block(    line) {
+      while ((getline line < block_file) > 0) {
+        print line
+      }
+      close(block_file)
+      print ""
+      emitted = 1
+    }
+    BEGIN {
+      skip = 0
+      emitted = 0
+    }
+    /^# RaspAP wlan0 configuration$/ {
+      emit_block()
+      skip = 1
+      next
+    }
+    skip && /^# RaspAP [^ ]+ configuration$/ {
+      skip = 0
+    }
+    !skip {
+      print
+    }
+    END {
+      if (!emitted) {
+        print ""
+        emit_block()
+      }
+    }
+  ' "$source_file" > "$output_file"
+}
+
+install_raspap_if_requested() {
+  local install_flags=()
+
+  if [[ "$INSTALL_RASPAP" != "1" ]]; then
+    note_status "raspap install disabled in config.env"
+    return 0
+  fi
+
+  if [[ -d /etc/raspap ]]; then
+    log "raspap already installed"
+    note_status "raspap already installed"
+    return 0
+  fi
+
+  if [[ -n "$RASPAP_INSTALL_FLAGS" ]]; then
+    read -r -a install_flags <<< "$RASPAP_INSTALL_FLAGS"
+  fi
+
+  log "installing raspap using the official installer"
+  if curl -fsSL "$RASPAP_INSTALL_URL" | bash -s -- "${install_flags[@]}"; then
+    note_change "installed raspap using $RASPAP_INSTALL_URL"
+    note_status "raspap installed"
+    return 0
+  fi
+
+  die "raspap installation failed"
+}
+
+configure_raspap_if_requested() {
+  local ap_ip ap_prefix ap_mask
+  local dhcpcd_block_file="$TMP_DIR/raspap-wlan0-dhcpcd.block"
+  local rendered_dhcpcd="$TMP_DIR/dhcpcd.conf.rendered"
+  local rendered_defaults="$TMP_DIR/defaults.json.rendered"
+  local auth_file="$TMP_DIR/raspap.auth"
+  local auth_hash auth_owner auth_group
+  local defaults_owner defaults_group
+
+  if [[ "$INSTALL_RASPAP" != "1" ]]; then
+    return 0
+  fi
+
+  [[ -f /etc/hostapd/hostapd.conf ]] || die "raspap hostapd config missing: /etc/hostapd/hostapd.conf"
+  [[ -f /etc/dnsmasq.d/090_wlan0.conf ]] || die "raspap dnsmasq config missing: /etc/dnsmasq.d/090_wlan0.conf"
+  [[ -f /etc/dhcpcd.conf ]] || die "raspap dhcpcd config missing: /etc/dhcpcd.conf"
+  [[ -d /etc/raspap ]] || die "raspap config directory missing: /etc/raspap"
+
+  [[ ${#RASPAP_AP_SSID} -gt 0 ]] || die "RASPAP_AP_SSID must not be empty"
+  [[ ${#RASPAP_AP_PASSPHRASE} -ge 8 ]] || die "RASPAP_AP_PASSPHRASE must be at least 8 characters"
+  [[ ${#RASPAP_ADMIN_USER} -gt 0 ]] || die "RASPAP_ADMIN_USER must not be empty"
+  [[ ${#RASPAP_ADMIN_PASSWORD} -gt 0 ]] || die "RASPAP_ADMIN_PASSWORD must not be empty"
+  [[ "$RASPAP_AP_SUBNET_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]] || \
+    die "RASPAP_AP_SUBNET_CIDR must look like 10.42.0.1/24"
+
+  ap_ip="${RASPAP_AP_SUBNET_CIDR%/*}"
+  ap_prefix="${RASPAP_AP_SUBNET_CIDR#*/}"
+  ap_mask="$(cidr_prefix_to_mask "$ap_prefix")" || die "invalid prefix in RASPAP_AP_SUBNET_CIDR: $RASPAP_AP_SUBNET_CIDR"
+
+  log "configuring raspap access point defaults"
+  upsert_key_value_line /etc/hostapd/hostapd.conf ssid "$RASPAP_AP_SSID"
+  upsert_key_value_line /etc/hostapd/hostapd.conf wpa_passphrase "$RASPAP_AP_PASSPHRASE"
+
+  upsert_key_value_line /etc/dnsmasq.d/090_wlan0.conf interface "wlan0"
+  upsert_key_value_line /etc/dnsmasq.d/090_wlan0.conf dhcp-range "$RASPAP_AP_DHCP_RANGE"
+
+  {
+    printf '%s\n' '# RaspAP wlan0 configuration'
+    printf '%s\n' 'interface wlan0'
+    printf 'static ip_address=%s\n' "$RASPAP_AP_SUBNET_CIDR"
+    printf 'static routers=%s\n' "$ap_ip"
+    printf 'static domain_name_servers=%s\n' "$RASPAP_AP_DNS_SERVERS"
+    if [[ "$RASPAP_ENABLE_FALLBACK_AP" == "1" ]]; then
+      printf '%s\n' 'profile static_wlan0'
+      printf '%s\n' 'fallback static_wlan0'
+    fi
+    printf '%s\n' 'nogateway'
+  } > "$dhcpcd_block_file"
+  replace_raspap_dhcpcd_wlan0_block /etc/dhcpcd.conf "$dhcpcd_block_file" "$rendered_dhcpcd"
+  install -m 0644 -o root -g root "$rendered_dhcpcd" /etc/dhcpcd.conf
+
+  if [[ -f /etc/raspap/networking/defaults.json ]]; then
+    defaults_owner="$(stat -c '%U' /etc/raspap/networking/defaults.json 2>/dev/null || printf 'root')"
+    defaults_group="$(stat -c '%G' /etc/raspap/networking/defaults.json 2>/dev/null || printf 'root')"
+    jq \
+      --arg ap_ip "$ap_ip" \
+      --arg ap_mask "$ap_mask" \
+      --arg ap_dns "$RASPAP_AP_DNS_SERVERS" \
+      --arg dhcp_range "$RASPAP_AP_DHCP_RANGE" \
+      '.dhcp.wlan0["static ip_address"] = [$ap_ip]
+       | .dhcp.wlan0["static routers"] = [$ap_ip]
+       | .dhcp.wlan0["subnetmask"] = [$ap_mask]
+       | .dhcp.wlan0["static domain_name_servers"] = [$ap_dns]
+       | .dnsmasq.wlan0["dhcp-range"] = [$dhcp_range]' \
+      /etc/raspap/networking/defaults.json > "$rendered_defaults"
+    install -m 0644 -o "$defaults_owner" -g "$defaults_group" "$rendered_defaults" /etc/raspap/networking/defaults.json
+  else
+    warn "raspap defaults.json not found; skipped network defaults update"
+  fi
+
+  command -v php >/dev/null 2>&1 || die "php is required to generate a raspap bcrypt password hash"
+  auth_hash="$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT), PHP_EOL;' "$RASPAP_ADMIN_PASSWORD")" || \
+    die "failed to generate bcrypt hash for raspap admin password"
+
+  {
+    printf '%s\n' "$RASPAP_ADMIN_USER"
+    printf '%s\n' "$auth_hash"
+  } > "$auth_file"
+
+  if id www-data >/dev/null 2>&1; then
+    auth_owner="www-data"
+    auth_group="www-data"
+  else
+    auth_owner="root"
+    auth_group="root"
+  fi
+  install -m 0640 -o "$auth_owner" -g "$auth_group" "$auth_file" /etc/raspap/raspap.auth
+
+  note_change "configured raspap AP SSID to $RASPAP_AP_SSID"
+  note_change "configured raspap AP subnet to $RASPAP_AP_SUBNET_CIDR"
+  note_change "configured raspap admin credentials for user $RASPAP_ADMIN_USER"
+  if [[ "$RASPAP_ENABLE_FALLBACK_AP" == "1" ]]; then
+    note_status "raspap fallback AP behavior enabled for wlan0"
+  else
+    note_status "raspap fallback AP behavior disabled for wlan0"
+  fi
+}
+
+ensure_raspap_service_if_requested() {
+  if [[ "$INSTALL_RASPAP" != "1" ]]; then
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found; cannot validate raspap web service"
+    note_manual "ensure the raspap web service is active manually"
+    return 0
+  fi
+
+  if systemctl is-enabled --quiet lighttpd && systemctl is-active --quiet lighttpd; then
+    log "raspap web service already enabled and active (lighttpd)"
+    return 0
+  fi
+
+  log "ensuring raspap web service is enabled and active"
+  if systemctl enable --now lighttpd; then
+    note_change "ensured raspap web service (lighttpd) is enabled and active"
+    return 0
+  fi
+
+  warn "could not enable raspap web service automatically"
+  note_manual "enable the raspap web service manually with: sudo systemctl enable --now lighttpd"
+  return 1
 }
 
 install_tailscale_if_missing() {
@@ -488,6 +731,13 @@ render_doctor_config() {
     printf 'KAI_VENV_DIR=%q\n' "$VENV_DIR"
     printf 'CREATE_VENV=%q\n' "$CREATE_VENV"
     printf 'INSTALL_AVAHI=%q\n' "$INSTALL_AVAHI"
+    printf 'INSTALL_RASPAP=%q\n' "$INSTALL_RASPAP"
+    printf 'RASPAP_INSTALL_URL=%q\n' "$RASPAP_INSTALL_URL"
+    printf 'RASPAP_AP_SSID=%q\n' "$RASPAP_AP_SSID"
+    printf 'RASPAP_AP_SUBNET_CIDR=%q\n' "$RASPAP_AP_SUBNET_CIDR"
+    printf 'RASPAP_AP_DHCP_RANGE=%q\n' "$RASPAP_AP_DHCP_RANGE"
+    printf 'RASPAP_ENABLE_FALLBACK_AP=%q\n' "$RASPAP_ENABLE_FALLBACK_AP"
+    printf 'RASPAP_ADMIN_USER=%q\n' "$RASPAP_ADMIN_USER"
     printf 'SSH_SNIPPET=%q\n' "$SSH_SNIPPET_DEST"
     printf 'SYSTEMD_UNIT=%q\n' "$SYSTEMD_UNIT_DEST"
     printf 'EDGE_ENV_FILE=%q\n' "$EDGE_ENV_DEST"
@@ -517,6 +767,12 @@ prepare_manual_follow_up() {
   note_manual "run sudo $DOCTOR_HELPER_DEST after bootstrap to validate node readiness"
   note_manual "run $AUDIO_HELPER_DEST after the target microphone and speaker hardware are attached"
   note_manual "run sudo -u $KAI_USER $PUSH_TO_TALK_DEST for a manual one-shot record -> /audio -> playback test"
+
+  if [[ "$INSTALL_RASPAP" == "1" ]]; then
+    note_manual "join the fallback AP SSID \"$RASPAP_AP_SSID\" to reach the setup network if upstream wifi is unavailable"
+    note_manual "open the raspap web ui from the same lan and verify login with the configured admin user: $RASPAP_ADMIN_USER"
+    note_manual "restart the node (or restart hostapd, dnsmasq, dhcpcd) after bootstrap if AP settings do not apply immediately"
+  fi
 
   if [[ -z "$KAI_CORE_BASE_URL" ]]; then
     note_status "kai-core base URL is not configured yet"
@@ -575,6 +831,9 @@ main() {
   prepare_manual_follow_up
   ensure_packages
   ensure_runtime_user_access
+  install_raspap_if_requested
+  configure_raspap_if_requested
+  ensure_raspap_service_if_requested || true
   install_tailscale_if_missing
   if ensure_tailscaled_service; then
     check_tailscale_state

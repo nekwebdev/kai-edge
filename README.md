@@ -9,7 +9,7 @@ this repo manages the pi once you can run `sudo ./bootstrap.sh` on the host.
 it does not manage:
 
 - first-boot imaging
-- wifi setup
+- initial wifi setup before bootstrap is first run
 - initial hostname changes
 - initial ssh key injection
 - tailscale browser login or auth-key flows
@@ -69,6 +69,7 @@ it does not manage:
 - installs tailscale with the official linux install script when it is missing
 - ensures `tailscaled` is enabled and running
 - checks tailscale state and prints the next manual command(s) when login or `tailscale ssh` still needs operator action
+- installs and manages RaspAP by default (configurable via `INSTALL_RASPAP`)
 - creates the base directories
 - optionally creates a python venv
 - ensures the configured runtime user is in the `audio` group for manual ALSA access
@@ -102,6 +103,21 @@ the expected tailscale follow-up states are:
 
 this keeps tailscale ssh explicit because changing it can affect active ssh access paths.
 
+## raspap behavior
+
+bootstrap can install RaspAP with its official installer:
+
+- enabled by default with `INSTALL_RASPAP="1"`
+- uses `RASPAP_INSTALL_URL` (default `https://install.raspap.com`)
+- uses non-interactive default flags in `RASPAP_INSTALL_FLAGS`
+- preconfigures AP SSID and passphrase from `RASPAP_AP_SSID` and `RASPAP_AP_PASSPHRASE`
+- preconfigures a static AP subnet with `RASPAP_AP_SUBNET_CIDR`, `RASPAP_AP_DHCP_RANGE`, and `RASPAP_AP_DNS_SERVERS`
+- enables fallback AP behavior by default with `RASPAP_ENABLE_FALLBACK_AP="1"` (writes `profile static_wlan0` and `fallback static_wlan0` in `dhcpcd.conf`)
+- preconfigures web UI credentials from `RASPAP_ADMIN_USER` and `RASPAP_ADMIN_PASSWORD`
+- ensures `lighttpd` is enabled and active after install
+
+if you do not want RaspAP managed by bootstrap, set `INSTALL_RASPAP="0"` in `config.env`.
+
 ## defaults
 
 the default package set is:
@@ -130,6 +146,20 @@ the default one-shot runtime settings written to `/etc/kai/edge.env` are:
 - `KAI_AUDIO_SAMPLE_RATE="16000"`
 - `KAI_HTTP_TIMEOUT_SECONDS="60"`
 - empty optional `KAI_RECORD_DEVICE` and `KAI_PLAYBACK_DEVICE`
+
+the default RaspAP settings are:
+
+- `INSTALL_RASPAP="1"`
+- `RASPAP_INSTALL_URL="https://install.raspap.com"`
+- `RASPAP_INSTALL_FLAGS="--yes --openvpn 0 --wireguard 0 --adblock 0 --rest 0 --provider 0"`
+- `RASPAP_AP_SSID="Kai-Setup"`
+- `RASPAP_AP_PASSPHRASE="KaiSetup12345"`
+- `RASPAP_AP_SUBNET_CIDR="10.42.0.1/24"`
+- `RASPAP_AP_DHCP_RANGE="10.42.0.50,10.42.0.150,255.255.255.0,12h"`
+- `RASPAP_AP_DNS_SERVERS="1.1.1.1 8.8.8.8"`
+- `RASPAP_ENABLE_FALLBACK_AP="1"`
+- `RASPAP_ADMIN_USER="admin"`
+- `RASPAP_ADMIN_PASSWORD="kai-admin-change-this"`
 
 ## usage
 
@@ -174,7 +204,7 @@ run this after bootstrap finishes:
 sudo /opt/kai/bin/kai-doctor
 ```
 
-`kai-doctor` is a lightweight readiness check for the pi. it confirms that the expected directories and commands exist, validates the runtime user and audio group membership, checks that `/etc/kai/edge.env` and `/opt/kai/bin/kai-push-to-talk` are installed, validates `sshd -t`, reports tailscale daemon and auth state, verifies tailscale ssh from `tailscale debug prefs`, checks `avahi-daemon` when it is enabled, confirms the placeholder `kai-edge.service` unit is present, verifies the python venv, and reports whether alsa playback and capture devices are currently visible.
+`kai-doctor` is a lightweight readiness check for the pi. it confirms that the expected directories and commands exist, validates the runtime user and audio group membership, checks that `/etc/kai/edge.env` and `/opt/kai/bin/kai-push-to-talk` are installed, validates `sshd -t`, reports tailscale daemon and auth state, verifies tailscale ssh from `tailscale debug prefs`, checks `avahi-daemon` when it is enabled, validates RaspAP and `lighttpd` when `INSTALL_RASPAP=1`, confirms the placeholder `kai-edge.service` unit is present, verifies the python venv, and reports whether alsa playback and capture devices are currently visible.
 
 the output is intentionally simple:
 

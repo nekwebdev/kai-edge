@@ -5,12 +5,17 @@ import os
 import signal
 import socket
 import tempfile
+import time
 from pathlib import Path
 
+from .audio import write_pcm16_mono_wav
+from .audio_stream import ArecordFrameSource
 from .config import EdgeConfig
 from .errors import EdgeRuntimeError
-from .interaction import record_request_audio, send_request_audio, speak_response_audio
+from .interaction import process_recorded_audio, record_request_audio
 from .state import EdgeState
+from .vad import VadDetector, build_vad_detector
+from .vad_session import UtteranceCollector, UtteranceDecision
 
 
 class EdgeDaemon:
@@ -76,7 +81,31 @@ class EdgeDaemon:
         request = b"".join(chunks).decode("utf-8", errors="replace").strip().lower()
         return request or "trigger"
 
-    def _run_one_interaction(self) -> tuple[bool, str]:
+    def _run_interaction_for_recorded_path(
+        self,
+        *,
+        recorded_audio_path: Path,
+        temp_dir: Path,
+    ) -> tuple[bool, str]:
+        try:
+            self._transition(EdgeState.SENDING)
+            process_recorded_audio(
+                config=self._config,
+                recorded_audio_path=recorded_audio_path,
+                temp_dir=temp_dir,
+                logger=self._logger,
+                on_before_speak=lambda: self._transition(EdgeState.SPEAKING),
+            )
+            self._logger.info("interaction complete")
+            return True, "ok"
+        except Exception as exc:
+            self._transition(EdgeState.ERROR)
+            self._logger.error("interaction failed: %s", exc)
+            return False, str(exc)
+        finally:
+            self._transition(EdgeState.IDLE)
+
+    def _run_one_manual_interaction(self) -> tuple[bool, str]:
         try:
             with tempfile.TemporaryDirectory(prefix="kai-edge-daemon-") as temp_dir_name:
                 temp_dir = Path(temp_dir_name)
@@ -86,35 +115,15 @@ class EdgeDaemon:
                     temp_dir=temp_dir,
                     logger=self._logger,
                 )
-
-                self._transition(EdgeState.SENDING)
-                core_response = send_request_audio(
-                    config=self._config,
+                return self._run_interaction_for_recorded_path(
                     recorded_audio_path=recorded_audio_path,
-                    logger=self._logger,
+                    temp_dir=temp_dir,
                 )
-                self._logger.info("transcribed text: %s", core_response.text)
-                self._logger.info("assistant response: %s", core_response.response)
-
-                if core_response.audio is not None:
-                    self._transition(EdgeState.SPEAKING)
-                    speak_response_audio(
-                        config=self._config,
-                        core_response=core_response,
-                        temp_dir=temp_dir,
-                        logger=self._logger,
-                    )
-                else:
-                    self._logger.info("backend returned no audio payload")
-
-            self._logger.info("interaction complete")
-            return True, "ok"
         except Exception as exc:
             self._transition(EdgeState.ERROR)
             self._logger.error("interaction failed: %s", exc)
-            return False, str(exc)
-        finally:
             self._transition(EdgeState.IDLE)
+            return False, str(exc)
 
     def _handle_connection(self, connection: socket.socket) -> str:
         try:
@@ -132,15 +141,12 @@ class EdgeDaemon:
             return "busy"
 
         self._logger.info("trigger received")
-        ok, message = self._run_one_interaction()
+        ok, message = self._run_one_manual_interaction()
         if ok:
             return "ok"
         return f"error: {message}"
 
-    def serve_forever(self) -> int:
-        signal.signal(signal.SIGINT, self._on_signal)
-        signal.signal(signal.SIGTERM, self._on_signal)
-
+    def _serve_manual_mode(self) -> int:
         server = self._prepare_socket()
         socket_path = self._config.trigger_socket_path
         self._logger.info("listening for trigger commands on %s", socket_path)
@@ -163,5 +169,147 @@ class EdgeDaemon:
             server.close()
             self._cleanup_socket_path()
 
-        self._logger.info("daemon stopped")
+        self._transition(EdgeState.IDLE)
         return 0
+
+    def _frame_bytes_for_vad(self) -> int:
+        samples_product = self._config.sample_rate * self._config.vad_frame_ms
+        if samples_product % 1000 != 0:
+            raise EdgeRuntimeError(
+                "sample rate and KAI_VAD_FRAME_MS do not produce whole-frame samples"
+            )
+        sample_count = samples_product // 1000
+        frame_bytes = sample_count * 2
+        if frame_bytes <= 0:
+            raise EdgeRuntimeError("computed VAD frame size is zero")
+        return frame_bytes
+
+    def _build_vad_collector(self) -> UtteranceCollector:
+        return UtteranceCollector(
+            frame_ms=self._config.vad_frame_ms,
+            pre_roll_ms=self._config.vad_pre_roll_ms,
+            min_speech_ms=self._config.vad_min_speech_ms,
+            trailing_silence_ms=self._config.vad_trailing_silence_ms,
+            max_utterance_ms=self._config.vad_max_utterance_ms,
+        )
+
+    def _capture_vad_utterance(
+        self,
+        *,
+        detector: VadDetector,
+        collector: UtteranceCollector,
+        frame_bytes: int,
+    ) -> UtteranceDecision | None:
+        with ArecordFrameSource(
+            sample_rate=self._config.sample_rate,
+            frame_bytes=frame_bytes,
+            record_device=self._config.record_device,
+            logger=self._logger,
+        ) as frame_source:
+            while not self._stop_requested:
+                frame = frame_source.read_frame()
+                is_speech = detector.is_speech(frame=frame, sample_rate=self._config.sample_rate)
+                speech_start, decision = collector.consume_frame(frame=frame, is_speech=is_speech)
+                if speech_start:
+                    self._logger.info("speech start detected")
+                    self._transition(EdgeState.RECORDING)
+                if decision is not None:
+                    self._logger.info("speech end detected (%s)", decision.stop_reason)
+                    return decision
+        return None
+
+    def _apply_vad_cooldown(self) -> None:
+        if self._stop_requested or self._config.vad_cooldown_ms <= 0:
+            return
+        duration_seconds = self._config.vad_cooldown_ms / 1000.0
+        self._logger.info("cooldown %.2fs before re-arming VAD", duration_seconds)
+        time.sleep(duration_seconds)
+
+    def _serve_vad_mode(self) -> int:
+        detector = build_vad_detector(config=self._config, logger=self._logger)
+        frame_bytes = self._frame_bytes_for_vad()
+        self._logger.info(
+            "VAD armed: backend=%s frame_ms=%s min_speech_ms=%s trailing_silence_ms=%s max_utterance_ms=%s",
+            detector.backend_name,
+            self._config.vad_frame_ms,
+            self._config.vad_min_speech_ms,
+            self._config.vad_trailing_silence_ms,
+            self._config.vad_max_utterance_ms,
+        )
+
+        while not self._stop_requested:
+            self._transition(EdgeState.LISTENING)
+            collector = self._build_vad_collector()
+            try:
+                decision = self._capture_vad_utterance(
+                    detector=detector,
+                    collector=collector,
+                    frame_bytes=frame_bytes,
+                )
+            except Exception as exc:
+                self._transition(EdgeState.ERROR)
+                self._logger.error("VAD capture failed: %s", exc)
+                self._transition(EdgeState.IDLE)
+                self._apply_vad_cooldown()
+                continue
+
+            if decision is None:
+                break
+
+            if not decision.accepted:
+                self._logger.info(
+                    "utterance rejected: reason=%s stop_reason=%s speech_ms=%s utterance_ms=%s",
+                    decision.reason,
+                    decision.stop_reason,
+                    decision.speech_ms,
+                    decision.utterance_ms,
+                )
+                self._transition(EdgeState.IDLE)
+                self._apply_vad_cooldown()
+                continue
+
+            self._logger.info(
+                "utterance accepted: stop_reason=%s speech_ms=%s utterance_ms=%s",
+                decision.stop_reason,
+                decision.speech_ms,
+                decision.utterance_ms,
+            )
+            try:
+                with tempfile.TemporaryDirectory(prefix="kai-edge-daemon-vad-") as temp_dir_name:
+                    temp_dir = Path(temp_dir_name)
+                    recorded_audio_path = temp_dir / "recorded.wav"
+                    write_pcm16_mono_wav(
+                        output_path=recorded_audio_path,
+                        sample_rate=self._config.sample_rate,
+                        frames=decision.frames,
+                    )
+                    self._run_interaction_for_recorded_path(
+                        recorded_audio_path=recorded_audio_path,
+                        temp_dir=temp_dir,
+                    )
+            except Exception as exc:
+                self._transition(EdgeState.ERROR)
+                self._logger.error("VAD interaction failed: %s", exc)
+                self._transition(EdgeState.IDLE)
+
+            self._apply_vad_cooldown()
+
+        self._transition(EdgeState.IDLE)
+        return 0
+
+    def serve_forever(self) -> int:
+        signal.signal(signal.SIGINT, self._on_signal)
+        signal.signal(signal.SIGTERM, self._on_signal)
+
+        mode = self._config.trigger_mode
+        self._logger.info("trigger mode selected: %s", mode)
+
+        if mode == "manual":
+            result = self._serve_manual_mode()
+        elif mode == "vad":
+            result = self._serve_vad_mode()
+        else:
+            raise EdgeRuntimeError(f"unsupported trigger mode: {mode}")
+
+        self._logger.info("daemon stopped")
+        return result

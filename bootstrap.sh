@@ -91,11 +91,28 @@ load_config() {
   : "${KAI_RECORD_SECONDS:=5}"
   : "${KAI_AUDIO_SAMPLE_RATE:=16000}"
   : "${KAI_HTTP_TIMEOUT_SECONDS:=60}"
+  : "${KAI_TRIGGER_MODE:=manual}"
   : "${KAI_TRIGGER_SOCKET_PATH:=/run/kai-edge/trigger.sock}"
+  : "${KAI_VAD_AGGRESSIVENESS:=2}"
+  : "${KAI_VAD_FRAME_MS:=30}"
+  : "${KAI_VAD_PRE_ROLL_MS:=250}"
+  : "${KAI_VAD_MIN_SPEECH_MS:=350}"
+  : "${KAI_VAD_TRAILING_SILENCE_MS:=700}"
+  : "${KAI_VAD_MAX_UTTERANCE_MS:=10000}"
+  : "${KAI_VAD_COOLDOWN_MS:=400}"
+  : "${KAI_VAD_ENERGY_THRESHOLD:=260}"
   : "${ENABLE_KAI_EDGE_SERVICE:=0}"
   : "${KAI_RECORD_DEVICE:=}"
   : "${KAI_PLAYBACK_DEVICE:=}"
   : "${APT_PACKAGES_EXTRA:=}"
+
+  case "$KAI_TRIGGER_MODE" in
+    manual|vad)
+      ;;
+    *)
+      die "KAI_TRIGGER_MODE must be one of: manual, vad (got: $KAI_TRIGGER_MODE)"
+      ;;
+  esac
 
   if [[ -z "${KAI_USER:-}" ]]; then
     KAI_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
@@ -179,7 +196,16 @@ render_edge_env() {
     -e "s|__KAI_RECORD_SECONDS__|$(escape_sed_replacement "$KAI_RECORD_SECONDS")|g" \
     -e "s|__KAI_AUDIO_SAMPLE_RATE__|$(escape_sed_replacement "$KAI_AUDIO_SAMPLE_RATE")|g" \
     -e "s|__KAI_HTTP_TIMEOUT_SECONDS__|$(escape_sed_replacement "$KAI_HTTP_TIMEOUT_SECONDS")|g" \
+    -e "s|__KAI_TRIGGER_MODE__|$(escape_sed_replacement "$KAI_TRIGGER_MODE")|g" \
     -e "s|__KAI_TRIGGER_SOCKET_PATH__|$(escape_sed_replacement "$KAI_TRIGGER_SOCKET_PATH")|g" \
+    -e "s|__KAI_VAD_AGGRESSIVENESS__|$(escape_sed_replacement "$KAI_VAD_AGGRESSIVENESS")|g" \
+    -e "s|__KAI_VAD_FRAME_MS__|$(escape_sed_replacement "$KAI_VAD_FRAME_MS")|g" \
+    -e "s|__KAI_VAD_PRE_ROLL_MS__|$(escape_sed_replacement "$KAI_VAD_PRE_ROLL_MS")|g" \
+    -e "s|__KAI_VAD_MIN_SPEECH_MS__|$(escape_sed_replacement "$KAI_VAD_MIN_SPEECH_MS")|g" \
+    -e "s|__KAI_VAD_TRAILING_SILENCE_MS__|$(escape_sed_replacement "$KAI_VAD_TRAILING_SILENCE_MS")|g" \
+    -e "s|__KAI_VAD_MAX_UTTERANCE_MS__|$(escape_sed_replacement "$KAI_VAD_MAX_UTTERANCE_MS")|g" \
+    -e "s|__KAI_VAD_COOLDOWN_MS__|$(escape_sed_replacement "$KAI_VAD_COOLDOWN_MS")|g" \
+    -e "s|__KAI_VAD_ENERGY_THRESHOLD__|$(escape_sed_replacement "$KAI_VAD_ENERGY_THRESHOLD")|g" \
     -e "s|__KAI_RECORD_DEVICE__|$(escape_sed_replacement "$KAI_RECORD_DEVICE")|g" \
     -e "s|__KAI_PLAYBACK_DEVICE__|$(escape_sed_replacement "$KAI_PLAYBACK_DEVICE")|g" \
     "$template" > "$output"
@@ -857,6 +883,11 @@ prepare_manual_follow_up() {
     note_manual "set KAI_CORE_BASE_URL in $CONFIG_FILE and rerun bootstrap before using $EDGE_TRIGGER_DEST or $PUSH_TO_TALK_DEST"
   else
     note_status "kai-core base URL configured for push-to-talk: $KAI_CORE_BASE_URL"
+  fi
+
+  note_status "kai-edge trigger mode configured: $KAI_TRIGGER_MODE"
+  if [[ "$KAI_TRIGGER_MODE" == "vad" ]]; then
+    note_manual "VAD mode is armed listening; use the physical mute switch during development testing"
   fi
 
   if [[ "$ENABLE_KAI_EDGE_SERVICE" == "1" ]]; then

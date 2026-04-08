@@ -48,6 +48,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    if config.trigger_mode != "manual":
+        print(
+            (
+                "error: KAI_TRIGGER_MODE is set to "
+                f"{config.trigger_mode!r}; kai-edge-trigger only works in manual mode"
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         response = send_trigger(
             socket_path=config.trigger_socket_path,

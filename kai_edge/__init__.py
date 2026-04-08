@@ -2,6 +2,7 @@ from __future__ import annotations
 
 __all__ = [
     "audio",
+    "audio_stream",
     "config",
     "core_client",
     "daemon",
@@ -9,4 +10,6 @@ __all__ = [
     "logging_config",
     "state",
     "trigger_client",
+    "vad",
+    "vad_session",
 ]

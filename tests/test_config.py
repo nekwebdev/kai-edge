@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from kai_edge.config import DEFAULT_TRIGGER_SOCKET_PATH, build_edge_config, load_env_file
+from kai_edge.config import (
+    DEFAULT_TRIGGER_MODE,
+    DEFAULT_TRIGGER_SOCKET_PATH,
+    build_edge_config,
+    load_env_file,
+)
 from kai_edge.errors import EdgeConfigError
 
 
@@ -57,6 +62,31 @@ class ConfigTests(unittest.TestCase):
     def test_build_edge_config_uses_default_trigger_socket_when_blank(self) -> None:
         config = build_edge_config(file_settings={"KAI_TRIGGER_SOCKET_PATH": "   "})
         self.assertEqual(config.trigger_socket_path, DEFAULT_TRIGGER_SOCKET_PATH)
+
+    def test_build_edge_config_defaults_to_manual_trigger_mode(self) -> None:
+        config = build_edge_config(file_settings={})
+        self.assertEqual(config.trigger_mode, DEFAULT_TRIGGER_MODE)
+
+    def test_build_edge_config_accepts_vad_trigger_mode(self) -> None:
+        config = build_edge_config(file_settings={"KAI_TRIGGER_MODE": "vad"})
+        self.assertEqual(config.trigger_mode, "vad")
+
+    def test_build_edge_config_rejects_invalid_trigger_mode(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_TRIGGER_MODE": "voice"})
+
+    def test_build_edge_config_rejects_invalid_vad_frame_size(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_VAD_FRAME_MS": "25"})
+
+    def test_build_edge_config_requires_vad_max_utterance_greater_than_min_speech(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(
+                file_settings={
+                    "KAI_VAD_MIN_SPEECH_MS": "1000",
+                    "KAI_VAD_MAX_UTTERANCE_MS": "1000",
+                }
+            )
 
 
 if __name__ == "__main__":

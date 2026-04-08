@@ -13,6 +13,16 @@ DEFAULT_RECORD_SECONDS = 5
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_TRIGGER_SOCKET_PATH = "/run/kai-edge/trigger.sock"
+DEFAULT_TRIGGER_MODE = "manual"
+VALID_TRIGGER_MODES = ("manual", "vad")
+DEFAULT_VAD_AGGRESSIVENESS = 2
+DEFAULT_VAD_FRAME_MS = 30
+DEFAULT_VAD_PRE_ROLL_MS = 250
+DEFAULT_VAD_MIN_SPEECH_MS = 350
+DEFAULT_VAD_TRAILING_SILENCE_MS = 700
+DEFAULT_VAD_MAX_UTTERANCE_MS = 10000
+DEFAULT_VAD_COOLDOWN_MS = 400
+DEFAULT_VAD_ENERGY_THRESHOLD = 260
 
 
 @dataclass(frozen=True)
@@ -24,6 +34,15 @@ class EdgeConfig:
     record_device: str | None
     playback_device: str | None
     trigger_socket_path: str
+    trigger_mode: str
+    vad_aggressiveness: int
+    vad_frame_ms: int
+    vad_pre_roll_ms: int
+    vad_min_speech_ms: int
+    vad_trailing_silence_ms: int
+    vad_max_utterance_ms: int
+    vad_cooldown_ms: int
+    vad_energy_threshold: int
 
 
 def positive_int(raw_value: str, setting_name: str) -> int:
@@ -41,6 +60,26 @@ def positive_int(raw_value: str, setting_name: str) -> int:
 def optional_string(value: str) -> str | None:
     stripped = value.strip()
     return stripped or None
+
+
+def non_negative_int(raw_value: str, setting_name: str) -> int:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise EdgeConfigError(f"{setting_name} must be an integer: {raw_value!r}") from exc
+
+    if value < 0:
+        raise EdgeConfigError(f"{setting_name} must be zero or greater: {raw_value!r}")
+
+    return value
+
+
+def parse_trigger_mode(raw_value: str) -> str:
+    value = raw_value.strip().lower()
+    if value not in VALID_TRIGGER_MODES:
+        valid_modes = ", ".join(VALID_TRIGGER_MODES)
+        raise EdgeConfigError(f"KAI_TRIGGER_MODE must be one of: {valid_modes}")
+    return value
 
 
 def load_env_file(path: str) -> dict[str, str]:
@@ -112,6 +151,15 @@ def build_edge_config(
         "KAI_RECORD_DEVICE": "",
         "KAI_PLAYBACK_DEVICE": "",
         "KAI_TRIGGER_SOCKET_PATH": DEFAULT_TRIGGER_SOCKET_PATH,
+        "KAI_TRIGGER_MODE": DEFAULT_TRIGGER_MODE,
+        "KAI_VAD_AGGRESSIVENESS": str(DEFAULT_VAD_AGGRESSIVENESS),
+        "KAI_VAD_FRAME_MS": str(DEFAULT_VAD_FRAME_MS),
+        "KAI_VAD_PRE_ROLL_MS": str(DEFAULT_VAD_PRE_ROLL_MS),
+        "KAI_VAD_MIN_SPEECH_MS": str(DEFAULT_VAD_MIN_SPEECH_MS),
+        "KAI_VAD_TRAILING_SILENCE_MS": str(DEFAULT_VAD_TRAILING_SILENCE_MS),
+        "KAI_VAD_MAX_UTTERANCE_MS": str(DEFAULT_VAD_MAX_UTTERANCE_MS),
+        "KAI_VAD_COOLDOWN_MS": str(DEFAULT_VAD_COOLDOWN_MS),
+        "KAI_VAD_ENERGY_THRESHOLD": str(DEFAULT_VAD_ENERGY_THRESHOLD),
     }
 
     backend_url = _get_setting("KAI_CORE_BASE_URL", file_settings, defaults, overrides).strip()
@@ -138,6 +186,49 @@ def build_edge_config(
     ).strip()
     if not trigger_socket_path:
         trigger_socket_path = DEFAULT_TRIGGER_SOCKET_PATH
+    trigger_mode = parse_trigger_mode(
+        _get_setting("KAI_TRIGGER_MODE", file_settings, defaults, overrides)
+    )
+    vad_aggressiveness = non_negative_int(
+        _get_setting("KAI_VAD_AGGRESSIVENESS", file_settings, defaults, overrides),
+        "KAI_VAD_AGGRESSIVENESS",
+    )
+    if vad_aggressiveness > 3:
+        raise EdgeConfigError("KAI_VAD_AGGRESSIVENESS must be between 0 and 3")
+
+    vad_frame_ms = positive_int(
+        _get_setting("KAI_VAD_FRAME_MS", file_settings, defaults, overrides),
+        "KAI_VAD_FRAME_MS",
+    )
+    if vad_frame_ms not in (10, 20, 30):
+        raise EdgeConfigError("KAI_VAD_FRAME_MS must be one of: 10, 20, 30")
+
+    vad_pre_roll_ms = non_negative_int(
+        _get_setting("KAI_VAD_PRE_ROLL_MS", file_settings, defaults, overrides),
+        "KAI_VAD_PRE_ROLL_MS",
+    )
+    vad_min_speech_ms = positive_int(
+        _get_setting("KAI_VAD_MIN_SPEECH_MS", file_settings, defaults, overrides),
+        "KAI_VAD_MIN_SPEECH_MS",
+    )
+    vad_trailing_silence_ms = positive_int(
+        _get_setting("KAI_VAD_TRAILING_SILENCE_MS", file_settings, defaults, overrides),
+        "KAI_VAD_TRAILING_SILENCE_MS",
+    )
+    vad_max_utterance_ms = positive_int(
+        _get_setting("KAI_VAD_MAX_UTTERANCE_MS", file_settings, defaults, overrides),
+        "KAI_VAD_MAX_UTTERANCE_MS",
+    )
+    vad_cooldown_ms = non_negative_int(
+        _get_setting("KAI_VAD_COOLDOWN_MS", file_settings, defaults, overrides),
+        "KAI_VAD_COOLDOWN_MS",
+    )
+    vad_energy_threshold = positive_int(
+        _get_setting("KAI_VAD_ENERGY_THRESHOLD", file_settings, defaults, overrides),
+        "KAI_VAD_ENERGY_THRESHOLD",
+    )
+    if vad_max_utterance_ms <= vad_min_speech_ms:
+        raise EdgeConfigError("KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS")
 
     return EdgeConfig(
         backend_url=backend_url,
@@ -147,6 +238,15 @@ def build_edge_config(
         record_device=record_device,
         playback_device=playback_device,
         trigger_socket_path=trigger_socket_path,
+        trigger_mode=trigger_mode,
+        vad_aggressiveness=vad_aggressiveness,
+        vad_frame_ms=vad_frame_ms,
+        vad_pre_roll_ms=vad_pre_roll_ms,
+        vad_min_speech_ms=vad_min_speech_ms,
+        vad_trailing_silence_ms=vad_trailing_silence_ms,
+        vad_max_utterance_ms=vad_max_utterance_ms,
+        vad_cooldown_ms=vad_cooldown_ms,
+        vad_energy_threshold=vad_energy_threshold,
     )
 
 

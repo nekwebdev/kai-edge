@@ -30,6 +30,7 @@ it does not manage:
 │       └── kai-edge.service.tmpl
 ├── kai_edge
 │   ├── audio.py
+│   ├── audio_stream.py
 │   ├── cli
 │   │   ├── daemon.py
 │   │   ├── push_to_talk.py
@@ -39,6 +40,8 @@ it does not manage:
 │   ├── daemon.py
 │   ├── interaction.py
 │   ├── state.py
+│   ├── vad.py
+│   ├── vad_session.py
 │   └── trigger_client.py
 ├── scripts
 │   ├── kai-audio-check.sh
@@ -48,42 +51,62 @@ it does not manage:
 │   └── kai-push-to-talk.py
 ├── tests
 │   ├── test_config.py
-│   └── test_core_client.py
+│   ├── test_core_client.py
+│   ├── test_daemon.py
+│   └── test_vad_session.py
 └── README.md
 ```
 
 ## runtime architecture
 
-`kai-edge` now runs as an explicit pi-side daemon for manual push-to-talk.
+`kai-edge` runs as an explicit pi-side daemon with two trigger modes:
 
-the daemon state machine is:
+- `manual`: socket-triggered push-to-talk (existing behavior)
+- `vad`: armed listening with speech start/end detection
+
+the daemon state model is:
 
 - `idle`
+- `listening`
 - `recording`
 - `sending`
 - `speaking`
 - `error`
 
-runtime flow for one interaction:
+shared logic lives in `kai_edge/`, so daemon mode and the one-shot helper still use the same config/audio/http/playback path.
 
-1. wait in `idle` for a local trigger command.
-2. transition to `recording` and capture one wav clip with `arecord`.
-3. transition to `sending` and `POST` that wav to `${KAI_CORE_BASE_URL}/audio`.
-4. parse `text`, `response`, and optional `audio` from the json response.
-5. when audio is present, transition to `speaking` and play it with `aplay`.
-6. on success or failure, return to `idle`.
+## trigger modes
 
-shared logic is in `kai_edge/` so both daemon mode and the one-shot helper use the same config/audio/http path.
+### manual mode
 
-## trigger model
+manual mode is unchanged:
 
-the trigger model is a local unix socket command:
+1. daemon waits in `idle` for a local unix socket trigger.
+2. on trigger, daemon records one fixed-duration wav clip.
+3. daemon sends it to `${KAI_CORE_BASE_URL}/audio`.
+4. daemon plays returned audio when present.
+5. daemon returns to `idle`.
 
-- daemon listens on `KAI_TRIGGER_SOCKET_PATH` (default `/run/kai-edge/trigger.sock`)
-- operator runs `/opt/kai/bin/kai-edge-trigger`
-- trigger command sends one request and waits for result (`ok`, `busy`, or `error: ...`)
+### vad mode
 
-this works cleanly over ssh, does not require extra hardware, and keeps push-to-talk explicit.
+vad mode arms the microphone and loops:
+
+1. stay in `listening` while reading short audio frames.
+2. transition to `recording` when speech is detected.
+3. stop on trailing silence or max utterance duration.
+4. reject short/noise bursts below minimum speech duration.
+5. send accepted wav to `${KAI_CORE_BASE_URL}/audio`.
+6. play returned audio when present.
+7. return to `idle`, apply cooldown, and re-arm.
+
+logs include mode selection, arm state, speech start/end, accept/reject reason, sending/speaking/idle transitions, and errors.
+
+## vad implementation choice
+
+the daemon prefers the lightweight `webrtcvad` python module when available.
+if it is missing or the sample rate is unsupported, it falls back to an internal energy-threshold detector.
+
+this keeps deployment simple and avoids heavyweight speech stacks while still giving a practical VAD loop for pi testing.
 
 ## managed paths on the pi
 
@@ -116,7 +139,7 @@ this works cleanly over ssh, does not require extra hardware, and keeps push-to-
 - installs managed ssh hardening and validates `sshd -t`
 - optionally enables `avahi-daemon` for `kai.local`
 - installs runtime package and helper commands
-- renders `/etc/kai/edge.env`
+- renders `/etc/kai/edge.env` including trigger mode and VAD settings
 - installs real `kai-edge.service` and reloads systemd
 - optionally enables/starts `kai-edge.service` when `ENABLE_KAI_EDGE_SERVICE="1"`
 - writes `/etc/kai/bootstrap.env` for `kai-doctor`
@@ -147,7 +170,7 @@ ENABLE_KAI_EDGE_SERVICE="1"
 
 ## runtime config (`/etc/kai/edge.env`)
 
-managed keys:
+core/runtime keys:
 
 - `KAI_CORE_BASE_URL`
 - `KAI_RECORD_SECONDS`
@@ -155,7 +178,39 @@ managed keys:
 - `KAI_HTTP_TIMEOUT_SECONDS`
 - `KAI_RECORD_DEVICE`
 - `KAI_PLAYBACK_DEVICE`
-- `KAI_TRIGGER_SOCKET_PATH`
+
+trigger keys:
+
+- `KAI_TRIGGER_MODE` (`manual` or `vad`)
+- `KAI_TRIGGER_SOCKET_PATH` (manual trigger socket path)
+
+vad tuning keys:
+
+- `KAI_VAD_AGGRESSIVENESS`
+- `KAI_VAD_FRAME_MS`
+- `KAI_VAD_PRE_ROLL_MS`
+- `KAI_VAD_MIN_SPEECH_MS`
+- `KAI_VAD_TRAILING_SILENCE_MS`
+- `KAI_VAD_MAX_UTTERANCE_MS`
+- `KAI_VAD_COOLDOWN_MS`
+- `KAI_VAD_ENERGY_THRESHOLD` (fallback detector threshold)
+
+## switching modes
+
+1. set `KAI_TRIGGER_MODE` in `config.env`:
+   - `manual` for explicit socket trigger
+   - `vad` for armed listening
+2. rerun bootstrap:
+
+```bash
+sudo ./bootstrap.sh
+```
+
+3. restart service:
+
+```bash
+sudo systemctl restart kai-edge.service
+```
 
 ## service operations
 
@@ -179,20 +234,41 @@ journal logs:
 sudo journalctl -u kai-edge.service -f
 ```
 
-## push-to-talk usage
+## usage
 
-### daemon path (recommended)
+### manual daemon path
 
-1. ensure daemon is running (`systemctl start kai-edge.service`).
+1. ensure daemon is running:
+
+```bash
+sudo systemctl start kai-edge.service
+```
+
 2. trigger one interaction:
 
 ```bash
 sudo -u <kai-user> /opt/kai/bin/kai-edge-trigger
 ```
 
+### vad daemon path (development workflow)
+
+recommended workflow while testing VAD on the conference device:
+
+1. keep the physical mute switch enabled by default.
+2. unmute only when ready to test one utterance.
+3. speak naturally; VAD captures one utterance and sends it.
+4. re-mute after playback.
+5. inspect logs:
+
+```bash
+sudo journalctl -u kai-edge.service -f
+```
+
+this phase relies on hardware mute for privacy/safety control during development.
+
 ### one-shot fallback path
 
-`kai-push-to-talk` is still available for direct one-off runs without the daemon:
+`kai-push-to-talk` remains available for direct one-off runs without the daemon:
 
 ```bash
 sudo -u <kai-user> /opt/kai/bin/kai-push-to-talk
@@ -204,21 +280,6 @@ optional one-off overrides still work:
 sudo -u <kai-user> /opt/kai/bin/kai-push-to-talk --record-seconds 6
 sudo -u <kai-user> /opt/kai/bin/kai-push-to-talk --backend-url http://kai-core.tailnet:8000
 ```
-
-## daemon path vs one-shot helper
-
-daemon path:
-
-- long-running process under systemd
-- explicit trigger per interaction
-- stable journal logs and restart policy
-- state-machine visibility (`idle`, `recording`, `sending`, `speaking`, `error`)
-
-one-shot helper:
-
-- starts, runs one interaction, exits
-- useful for direct troubleshooting and fallback
-- uses the same shared runtime modules
 
 ## post-bootstrap validation
 
@@ -238,30 +299,32 @@ sudo /opt/kai/bin/kai-doctor
 - raspap state when enabled
 - real `kai-edge.service` unit shape (not placeholder)
 - service state expectations based on `ENABLE_KAI_EDGE_SERVICE`
-- trigger socket presence when service is active
+- mode-aware runtime checks for `manual` vs `vad`
+- trigger socket expectations when service is active
+- VAD config shape checks when `KAI_TRIGGER_MODE=vad`
 - python venv and alsa device visibility
+
+in VAD mode, doctor explicitly does not claim end-to-end speech quality; it only validates safe/static runtime shape.
 
 exit status:
 
 - `0` when no `fail` checks are present
 - `1` when one or more required checks fail
 
-## intentionally not implemented yet
+## limitations in this phase
 
 this runtime intentionally does **not** include:
 
 - wake word
-- vad
 - streaming stt/tts
-- continuous open-mic listening
-- conversation memory
+- conversation memory on the edge
 - multi-turn dialogue orchestration on the edge
 
-those are later phases; this repo currently targets explicit manual one-shot push-to-talk.
+wake word is intentionally deferred so VAD behavior, daemon stability, and operator controls can be validated first.
 
-## usage
+## quick start
 
-review `config.env`, set `KAI_CORE_BASE_URL`, then run:
+review `config.env`, set `KAI_CORE_BASE_URL`, choose `KAI_TRIGGER_MODE`, then run:
 
 ```bash
 sudo ./bootstrap.sh

@@ -109,6 +109,14 @@ check_command() {
   fi
 }
 
+is_non_negative_int() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_positive_int() {
+  is_non_negative_int "$1" && [[ "$1" -gt 0 ]]
+}
+
 check_required_directories() {
   check_directory "$KAI_ROOT"
   check_directory "$KAI_APP_DIR"
@@ -149,7 +157,9 @@ check_runtime_user() {
 }
 
 check_runtime_files() {
-  local backend_url trigger_socket
+  local backend_url trigger_mode trigger_socket
+  local vad_aggressiveness vad_frame_ms vad_min_speech_ms vad_trailing_silence_ms
+  local vad_max_utterance_ms vad_cooldown_ms vad_energy_threshold
 
   if [[ -x "$PUSH_TO_TALK_HELPER" ]]; then
     ok "push-to-talk helper present: $PUSH_TO_TALK_HELPER"
@@ -196,6 +206,23 @@ check_runtime_files() {
     warn "kai-core base URL is blank in $EDGE_ENV_FILE"
   fi
 
+  trigger_mode="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_MODE:-manual}"
+    ) 2>/dev/null || true
+  )"
+
+  case "$trigger_mode" in
+    manual|vad)
+      ok "trigger mode configured: $trigger_mode"
+      ;;
+    *)
+      fail "invalid or blank KAI_TRIGGER_MODE in $EDGE_ENV_FILE: ${trigger_mode:-<blank>}"
+      ;;
+  esac
+
   trigger_socket="$(
     (
       # shellcheck source=/dev/null
@@ -204,11 +231,132 @@ check_runtime_files() {
     ) 2>/dev/null || true
   )"
 
-  if [[ -n "$trigger_socket" ]]; then
-    ok "edge trigger socket configured: $trigger_socket"
-  else
-    fail "edge trigger socket path is blank in $EDGE_ENV_FILE"
+  if [[ "$trigger_mode" == "manual" ]]; then
+    if [[ -n "$trigger_socket" ]]; then
+      ok "edge trigger socket configured: $trigger_socket"
+    else
+      fail "edge trigger socket path is blank in $EDGE_ENV_FILE"
+    fi
+  elif [[ "$trigger_mode" == "vad" ]]; then
+    if [[ -n "$trigger_socket" ]]; then
+      ok "manual trigger socket still configured for fallback use: $trigger_socket"
+    else
+      warn "KAI_TRIGGER_SOCKET_PATH is blank; manual trigger helper will not work while in VAD mode"
+    fi
   fi
+
+  if [[ "$trigger_mode" != "vad" ]]; then
+    return 0
+  fi
+
+  vad_aggressiveness="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_AGGRESSIVENESS:-}"
+    ) 2>/dev/null || true
+  )"
+  if is_non_negative_int "$vad_aggressiveness" && [[ "$vad_aggressiveness" -le 3 ]]; then
+    ok "VAD aggressiveness configured: $vad_aggressiveness"
+  else
+    fail "invalid KAI_VAD_AGGRESSIVENESS in $EDGE_ENV_FILE: ${vad_aggressiveness:-<blank>}"
+  fi
+
+  vad_frame_ms="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_FRAME_MS:-}"
+    ) 2>/dev/null || true
+  )"
+  case "$vad_frame_ms" in
+    10|20|30)
+      ok "VAD frame size configured: ${vad_frame_ms}ms"
+      ;;
+    *)
+      fail "invalid KAI_VAD_FRAME_MS in $EDGE_ENV_FILE: ${vad_frame_ms:-<blank>}"
+      ;;
+  esac
+
+  vad_min_speech_ms="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_MIN_SPEECH_MS:-}"
+    ) 2>/dev/null || true
+  )"
+  if is_positive_int "$vad_min_speech_ms"; then
+    ok "VAD minimum speech duration configured: ${vad_min_speech_ms}ms"
+  else
+    fail "invalid KAI_VAD_MIN_SPEECH_MS in $EDGE_ENV_FILE: ${vad_min_speech_ms:-<blank>}"
+  fi
+
+  vad_trailing_silence_ms="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_TRAILING_SILENCE_MS:-}"
+    ) 2>/dev/null || true
+  )"
+  if is_positive_int "$vad_trailing_silence_ms"; then
+    ok "VAD trailing silence configured: ${vad_trailing_silence_ms}ms"
+  else
+    fail "invalid KAI_VAD_TRAILING_SILENCE_MS in $EDGE_ENV_FILE: ${vad_trailing_silence_ms:-<blank>}"
+  fi
+
+  vad_max_utterance_ms="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_MAX_UTTERANCE_MS:-}"
+    ) 2>/dev/null || true
+  )"
+  if is_positive_int "$vad_max_utterance_ms"; then
+    ok "VAD max utterance duration configured: ${vad_max_utterance_ms}ms"
+  else
+    fail "invalid KAI_VAD_MAX_UTTERANCE_MS in $EDGE_ENV_FILE: ${vad_max_utterance_ms:-<blank>}"
+  fi
+
+  vad_cooldown_ms="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_COOLDOWN_MS:-}"
+    ) 2>/dev/null || true
+  )"
+  if is_non_negative_int "$vad_cooldown_ms"; then
+    ok "VAD cooldown configured: ${vad_cooldown_ms}ms"
+  else
+    fail "invalid KAI_VAD_COOLDOWN_MS in $EDGE_ENV_FILE: ${vad_cooldown_ms:-<blank>}"
+  fi
+
+  vad_energy_threshold="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_ENERGY_THRESHOLD:-}"
+    ) 2>/dev/null || true
+  )"
+  if is_positive_int "$vad_energy_threshold"; then
+    ok "VAD fallback energy threshold configured: $vad_energy_threshold"
+  else
+    fail "invalid KAI_VAD_ENERGY_THRESHOLD in $EDGE_ENV_FILE: ${vad_energy_threshold:-<blank>}"
+  fi
+
+  if is_positive_int "$vad_min_speech_ms" && is_positive_int "$vad_max_utterance_ms" && [[ "$vad_max_utterance_ms" -le "$vad_min_speech_ms" ]]; then
+    fail "KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS"
+  fi
+
+  if python3 - <<'PY' >/dev/null 2>&1
+import webrtcvad
+PY
+  then
+    ok "python webrtcvad module available"
+  else
+    warn "python webrtcvad module not found; daemon will use energy fallback detector"
+  fi
+
+  warn "VAD runtime behavior is not fully validated by kai-doctor; run a live speech test with the physical mute switch"
 }
 
 check_ssh_state() {
@@ -418,7 +566,7 @@ check_raspap_state() {
 }
 
 check_systemd_state() {
-  local enabled_state active_state trigger_socket
+  local enabled_state active_state trigger_socket trigger_mode
 
   if [[ ! -f "$SYSTEMD_UNIT" ]]; then
     fail "kai-edge.service unit file missing: $SYSTEMD_UNIT"
@@ -469,6 +617,23 @@ check_systemd_state() {
     return 0
   fi
 
+  trigger_mode="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_MODE:-manual}"
+    ) 2>/dev/null || true
+  )"
+
+  case "$trigger_mode" in
+    manual|vad)
+      ;;
+    *)
+      fail "cannot verify runtime mode because KAI_TRIGGER_MODE is invalid: ${trigger_mode:-<blank>}"
+      return 0
+      ;;
+  esac
+
   trigger_socket="$(
     (
       # shellcheck source=/dev/null
@@ -477,15 +642,26 @@ check_systemd_state() {
     ) 2>/dev/null || true
   )"
 
-  if [[ -z "$trigger_socket" ]]; then
-    fail "cannot verify daemon trigger socket because KAI_TRIGGER_SOCKET_PATH is empty"
+  if [[ "$trigger_mode" == "manual" ]]; then
+    if [[ -z "$trigger_socket" ]]; then
+      fail "cannot verify daemon trigger socket because KAI_TRIGGER_SOCKET_PATH is empty"
+      return 0
+    fi
+
+    if [[ -S "$trigger_socket" ]]; then
+      ok "daemon trigger socket present: $trigger_socket"
+    else
+      fail "daemon trigger socket missing while service is active: $trigger_socket"
+    fi
     return 0
   fi
 
-  if [[ -S "$trigger_socket" ]]; then
-    ok "daemon trigger socket present: $trigger_socket"
+  if [[ -z "$trigger_socket" ]]; then
+    ok "trigger socket check skipped in VAD mode (KAI_TRIGGER_SOCKET_PATH is blank)"
+  elif [[ -S "$trigger_socket" ]]; then
+    ok "daemon trigger socket present in VAD mode: $trigger_socket"
   else
-    fail "daemon trigger socket missing while service is active: $trigger_socket"
+    ok "trigger socket not present in VAD mode (expected when manual socket loop is disabled)"
   fi
 }
 

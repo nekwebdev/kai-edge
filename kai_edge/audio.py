@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import wave
 from pathlib import Path
 
 from .errors import EdgeRuntimeError
@@ -48,3 +49,14 @@ def play_audio(*, audio_path: Path, playback_device: str | None, logger: logging
     device_label = playback_device or "default playback device"
     logger.info("playing backend audio through %s", device_label)
     run_command(command, "audio playback")
+
+
+def write_pcm16_mono_wav(*, output_path: Path, sample_rate: int, frames: tuple[bytes, ...]) -> None:
+    with wave.open(str(output_path), "wb") as wave_file:
+        wave_file.setnchannels(1)
+        wave_file.setsampwidth(2)
+        wave_file.setframerate(sample_rate)
+        wave_file.writeframes(b"".join(frames))
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise EdgeRuntimeError(f"wav render produced an empty file: {output_path}")

@@ -13,7 +13,7 @@ from ..logging_config import configure_logging
 def build_parser() -> argparse.ArgumentParser:
     env_file_default = os.environ.get("KAI_EDGE_ENV_FILE", DEFAULT_ENV_FILE)
     parser = argparse.ArgumentParser(
-        description="Run the kai edge daemon and wait for explicit local trigger commands.",
+        description="Run the kai edge daemon in manual trigger or VAD armed-listening mode.",
     )
     parser.add_argument(
         "--env-file",
@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trigger-socket",
         default=None,
-        help="optional unix socket path override for trigger commands",
+        help="optional unix socket path override for manual trigger mode",
     )
     return parser
 

@@ -5,6 +5,7 @@ from enum import Enum
 
 class EdgeState(str, Enum):
     IDLE = "idle"
+    LISTENING = "listening"
     RECORDING = "recording"
     SENDING = "sending"
     SPEAKING = "speaking"

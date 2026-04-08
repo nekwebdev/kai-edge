@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,26 +68,43 @@ def speak_response_audio(
     return True
 
 
-def run_interaction(*, config: EdgeConfig, logger: logging.Logger) -> InteractionResult:
-    with tempfile.TemporaryDirectory(prefix="kai-push-to-talk-") as temp_dir_name:
-        temp_dir = Path(temp_dir_name)
-        recorded_audio_path = record_request_audio(config=config, temp_dir=temp_dir, logger=logger)
-        core_response = send_request_audio(
-            config=config,
-            recorded_audio_path=recorded_audio_path,
-            logger=logger,
-        )
-        logger.info("transcribed text: %s", core_response.text)
-        logger.info("assistant response: %s", core_response.response)
-        audio_played = speak_response_audio(
-            config=config,
-            core_response=core_response,
-            temp_dir=temp_dir,
-            logger=logger,
-        )
-
+def process_recorded_audio(
+    *,
+    config: EdgeConfig,
+    recorded_audio_path: Path,
+    temp_dir: Path,
+    logger: logging.Logger,
+    on_before_speak: Callable[[], None] | None = None,
+) -> InteractionResult:
+    core_response = send_request_audio(
+        config=config,
+        recorded_audio_path=recorded_audio_path,
+        logger=logger,
+    )
+    logger.info("transcribed text: %s", core_response.text)
+    logger.info("assistant response: %s", core_response.response)
+    if core_response.audio is not None and on_before_speak is not None:
+        on_before_speak()
+    audio_played = speak_response_audio(
+        config=config,
+        core_response=core_response,
+        temp_dir=temp_dir,
+        logger=logger,
+    )
     return InteractionResult(
         text=core_response.text,
         response=core_response.response,
         audio_played=audio_played,
     )
+
+
+def run_interaction(*, config: EdgeConfig, logger: logging.Logger) -> InteractionResult:
+    with tempfile.TemporaryDirectory(prefix="kai-push-to-talk-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        recorded_audio_path = record_request_audio(config=config, temp_dir=temp_dir, logger=logger)
+        return process_recorded_audio(
+            config=config,
+            recorded_audio_path=recorded_audio_path,
+            temp_dir=temp_dir,
+            logger=logger,
+        )

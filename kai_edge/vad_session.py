@@ -18,6 +18,7 @@ class UtteranceDecision:
     stop_reason: str
     utterance_ms: int
     speech_ms: int
+    longest_speech_run_ms: int
     frames: tuple[bytes, ...]
 
 
@@ -28,12 +29,14 @@ class UtteranceCollector:
         frame_ms: int,
         pre_roll_ms: int,
         min_speech_ms: int,
+        min_speech_run_ms: int,
         trailing_silence_ms: int,
         max_utterance_ms: int,
     ) -> None:
         self._frame_ms = frame_ms
         self._pre_roll_frames = milliseconds_to_frames(pre_roll_ms, frame_ms)
         self._min_speech_frames = milliseconds_to_frames(min_speech_ms, frame_ms)
+        self._min_speech_run_frames = milliseconds_to_frames(min_speech_run_ms, frame_ms)
         self._trailing_silence_frames = milliseconds_to_frames(trailing_silence_ms, frame_ms)
         self._max_utterance_frames = milliseconds_to_frames(max_utterance_ms, frame_ms)
         self._pre_roll: Deque[tuple[bytes, bool]] = deque(maxlen=max(1, self._pre_roll_frames))
@@ -41,6 +44,8 @@ class UtteranceCollector:
         self._segment_frames: list[bytes] = []
         self._speech_frames = 0
         self._silence_frames = 0
+        self._current_speech_run_frames = 0
+        self._max_speech_run_frames = 0
 
     @property
     def is_recording(self) -> bool:
@@ -52,6 +57,8 @@ class UtteranceCollector:
         self._segment_frames = []
         self._speech_frames = 0
         self._silence_frames = 0
+        self._current_speech_run_frames = 0
+        self._max_speech_run_frames = 0
 
     def consume_frame(self, *, frame: bytes, is_speech: bool) -> tuple[bool, UtteranceDecision | None]:
         speech_start = False
@@ -61,8 +68,12 @@ class UtteranceCollector:
             if is_speech:
                 self._speech_frames += 1
                 self._silence_frames = 0
+                self._current_speech_run_frames += 1
+                if self._current_speech_run_frames > self._max_speech_run_frames:
+                    self._max_speech_run_frames = self._current_speech_run_frames
             else:
                 self._silence_frames += 1
+                self._current_speech_run_frames = 0
 
             if len(self._segment_frames) >= self._max_utterance_frames:
                 return speech_start, self._finish(stop_reason="max_duration")
@@ -79,9 +90,12 @@ class UtteranceCollector:
         if self._pre_roll_frames > 0:
             self._segment_frames = [saved_frame for saved_frame, _ in self._pre_roll]
             self._speech_frames = sum(1 for _, saved_is_speech in self._pre_roll if saved_is_speech)
+            self._seed_speech_runs_from_pre_roll()
         else:
             self._segment_frames = [frame]
             self._speech_frames = 1
+            self._current_speech_run_frames = 1
+            self._max_speech_run_frames = 1
         self._silence_frames = 0
 
         if len(self._segment_frames) >= self._max_utterance_frames:
@@ -92,15 +106,41 @@ class UtteranceCollector:
         frames = tuple(self._segment_frames)
         utterance_ms = len(frames) * self._frame_ms
         speech_ms = self._speech_frames * self._frame_ms
-        accepted = self._speech_frames >= self._min_speech_frames
-        reason = "accepted" if accepted else "speech_too_short"
+        longest_speech_run_ms = self._max_speech_run_frames * self._frame_ms
+
+        if self._speech_frames < self._min_speech_frames:
+            accepted = False
+            reason = "speech_too_short"
+        elif self._max_speech_run_frames < self._min_speech_run_frames:
+            accepted = False
+            reason = "speech_run_too_short"
+        else:
+            accepted = True
+            reason = "accepted"
+
         decision = UtteranceDecision(
             accepted=accepted,
             reason=reason,
             stop_reason=stop_reason,
             utterance_ms=utterance_ms,
             speech_ms=speech_ms,
+            longest_speech_run_ms=longest_speech_run_ms,
             frames=frames,
         )
         self.reset()
         return decision
+
+    def _seed_speech_runs_from_pre_roll(self) -> None:
+        current_run_frames = 0
+        max_run_frames = 0
+
+        for _, saved_is_speech in self._pre_roll:
+            if saved_is_speech:
+                current_run_frames += 1
+                if current_run_frames > max_run_frames:
+                    max_run_frames = current_run_frames
+            else:
+                current_run_frames = 0
+
+        self._current_speech_run_frames = current_run_frames
+        self._max_speech_run_frames = max_run_frames

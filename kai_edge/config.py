@@ -15,10 +15,11 @@ DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_TRIGGER_SOCKET_PATH = "/run/kai-edge/trigger.sock"
 DEFAULT_TRIGGER_MODE = "manual"
 VALID_TRIGGER_MODES = ("manual", "vad")
-DEFAULT_VAD_AGGRESSIVENESS = 2
+DEFAULT_VAD_AGGRESSIVENESS = 3
 DEFAULT_VAD_FRAME_MS = 30
 DEFAULT_VAD_PRE_ROLL_MS = 250
-DEFAULT_VAD_MIN_SPEECH_MS = 350
+DEFAULT_VAD_MIN_SPEECH_MS = 1200
+DEFAULT_VAD_MIN_SPEECH_RUN_MS = 900
 DEFAULT_VAD_TRAILING_SILENCE_MS = 700
 DEFAULT_VAD_MAX_UTTERANCE_MS = 10000
 DEFAULT_VAD_COOLDOWN_MS = 400
@@ -39,6 +40,7 @@ class EdgeConfig:
     vad_frame_ms: int
     vad_pre_roll_ms: int
     vad_min_speech_ms: int
+    vad_min_speech_run_ms: int
     vad_trailing_silence_ms: int
     vad_max_utterance_ms: int
     vad_cooldown_ms: int
@@ -156,6 +158,7 @@ def build_edge_config(
         "KAI_VAD_FRAME_MS": str(DEFAULT_VAD_FRAME_MS),
         "KAI_VAD_PRE_ROLL_MS": str(DEFAULT_VAD_PRE_ROLL_MS),
         "KAI_VAD_MIN_SPEECH_MS": str(DEFAULT_VAD_MIN_SPEECH_MS),
+        "KAI_VAD_MIN_SPEECH_RUN_MS": str(DEFAULT_VAD_MIN_SPEECH_RUN_MS),
         "KAI_VAD_TRAILING_SILENCE_MS": str(DEFAULT_VAD_TRAILING_SILENCE_MS),
         "KAI_VAD_MAX_UTTERANCE_MS": str(DEFAULT_VAD_MAX_UTTERANCE_MS),
         "KAI_VAD_COOLDOWN_MS": str(DEFAULT_VAD_COOLDOWN_MS),
@@ -211,6 +214,10 @@ def build_edge_config(
         _get_setting("KAI_VAD_MIN_SPEECH_MS", file_settings, defaults, overrides),
         "KAI_VAD_MIN_SPEECH_MS",
     )
+    vad_min_speech_run_ms = positive_int(
+        _get_setting("KAI_VAD_MIN_SPEECH_RUN_MS", file_settings, defaults, overrides),
+        "KAI_VAD_MIN_SPEECH_RUN_MS",
+    )
     vad_trailing_silence_ms = positive_int(
         _get_setting("KAI_VAD_TRAILING_SILENCE_MS", file_settings, defaults, overrides),
         "KAI_VAD_TRAILING_SILENCE_MS",
@@ -229,6 +236,10 @@ def build_edge_config(
     )
     if vad_max_utterance_ms <= vad_min_speech_ms:
         raise EdgeConfigError("KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS")
+    if vad_max_utterance_ms <= vad_min_speech_run_ms:
+        raise EdgeConfigError(
+            "KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_RUN_MS"
+        )
 
     return EdgeConfig(
         backend_url=backend_url,
@@ -243,6 +254,7 @@ def build_edge_config(
         vad_frame_ms=vad_frame_ms,
         vad_pre_roll_ms=vad_pre_roll_ms,
         vad_min_speech_ms=vad_min_speech_ms,
+        vad_min_speech_run_ms=vad_min_speech_run_ms,
         vad_trailing_silence_ms=vad_trailing_silence_ms,
         vad_max_utterance_ms=vad_max_utterance_ms,
         vad_cooldown_ms=vad_cooldown_ms,

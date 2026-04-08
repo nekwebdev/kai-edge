@@ -189,6 +189,7 @@ class EdgeDaemon:
             frame_ms=self._config.vad_frame_ms,
             pre_roll_ms=self._config.vad_pre_roll_ms,
             min_speech_ms=self._config.vad_min_speech_ms,
+            min_speech_run_ms=self._config.vad_min_speech_run_ms,
             trailing_silence_ms=self._config.vad_trailing_silence_ms,
             max_utterance_ms=self._config.vad_max_utterance_ms,
         )
@@ -229,10 +230,11 @@ class EdgeDaemon:
         detector = build_vad_detector(config=self._config, logger=self._logger)
         frame_bytes = self._frame_bytes_for_vad()
         self._logger.info(
-            "VAD armed: backend=%s frame_ms=%s min_speech_ms=%s trailing_silence_ms=%s max_utterance_ms=%s",
+            "VAD armed: backend=%s frame_ms=%s min_speech_ms=%s min_speech_run_ms=%s trailing_silence_ms=%s max_utterance_ms=%s",
             detector.backend_name,
             self._config.vad_frame_ms,
             self._config.vad_min_speech_ms,
+            self._config.vad_min_speech_run_ms,
             self._config.vad_trailing_silence_ms,
             self._config.vad_max_utterance_ms,
         )
@@ -258,10 +260,11 @@ class EdgeDaemon:
 
             if not decision.accepted:
                 self._logger.info(
-                    "utterance rejected: reason=%s stop_reason=%s speech_ms=%s utterance_ms=%s",
+                    "utterance rejected: reason=%s stop_reason=%s speech_ms=%s speech_run_ms=%s utterance_ms=%s",
                     decision.reason,
                     decision.stop_reason,
                     decision.speech_ms,
+                    decision.longest_speech_run_ms,
                     decision.utterance_ms,
                 )
                 self._transition(EdgeState.IDLE)
@@ -269,9 +272,10 @@ class EdgeDaemon:
                 continue
 
             self._logger.info(
-                "utterance accepted: stop_reason=%s speech_ms=%s utterance_ms=%s",
+                "utterance accepted: stop_reason=%s speech_ms=%s speech_run_ms=%s utterance_ms=%s",
                 decision.stop_reason,
                 decision.speech_ms,
+                decision.longest_speech_run_ms,
                 decision.utterance_ms,
             )
             try:

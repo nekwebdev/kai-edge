@@ -16,6 +16,7 @@ class VadSessionTests(unittest.TestCase):
             frame_ms=20,
             pre_roll_ms=40,
             min_speech_ms=60,
+            min_speech_run_ms=40,
             trailing_silence_ms=40,
             max_utterance_ms=300,
         )
@@ -41,6 +42,7 @@ class VadSessionTests(unittest.TestCase):
         self.assertEqual(decision.reason, "accepted")
         self.assertEqual(decision.stop_reason, "trailing_silence")
         self.assertEqual(decision.speech_ms, 60)
+        self.assertEqual(decision.longest_speech_run_ms, 60)
         self.assertEqual(decision.utterance_ms, 120)
         self.assertEqual(decision.frames, (b"a", b"b", b"c", b"d", b"e", b"f"))
 
@@ -49,6 +51,7 @@ class VadSessionTests(unittest.TestCase):
             frame_ms=20,
             pre_roll_ms=0,
             min_speech_ms=60,
+            min_speech_run_ms=40,
             trailing_silence_ms=40,
             max_utterance_ms=300,
         )
@@ -65,6 +68,7 @@ class VadSessionTests(unittest.TestCase):
         self.assertEqual(decision.reason, "speech_too_short")
         self.assertEqual(decision.stop_reason, "trailing_silence")
         self.assertEqual(decision.speech_ms, 20)
+        self.assertEqual(decision.longest_speech_run_ms, 20)
         self.assertEqual(decision.utterance_ms, 60)
 
     def test_collector_stops_on_max_duration(self) -> None:
@@ -72,6 +76,7 @@ class VadSessionTests(unittest.TestCase):
             frame_ms=20,
             pre_roll_ms=0,
             min_speech_ms=40,
+            min_speech_run_ms=20,
             trailing_silence_ms=200,
             max_utterance_ms=60,
         )
@@ -87,6 +92,7 @@ class VadSessionTests(unittest.TestCase):
         self.assertTrue(decision.accepted)
         self.assertEqual(decision.stop_reason, "max_duration")
         self.assertEqual(decision.speech_ms, 60)
+        self.assertEqual(decision.longest_speech_run_ms, 60)
         self.assertEqual(decision.utterance_ms, 60)
         self.assertFalse(collector.is_recording)
 
@@ -95,6 +101,7 @@ class VadSessionTests(unittest.TestCase):
             frame_ms=20,
             pre_roll_ms=0,
             min_speech_ms=20,
+            min_speech_run_ms=20,
             trailing_silence_ms=20,
             max_utterance_ms=100,
         )
@@ -109,6 +116,39 @@ class VadSessionTests(unittest.TestCase):
         speech_start, second = collector.consume_frame(frame=b"c", is_speech=True)
         self.assertTrue(speech_start)
         self.assertIsNone(second)
+
+    def test_collector_rejects_when_speech_run_is_too_short(self) -> None:
+        collector = UtteranceCollector(
+            frame_ms=20,
+            pre_roll_ms=0,
+            min_speech_ms=80,
+            min_speech_run_ms=60,
+            trailing_silence_ms=40,
+            max_utterance_ms=300,
+        )
+
+        decision = None
+        for frame, is_speech in (
+            (b"a", True),
+            (b"b", False),
+            (b"c", True),
+            (b"d", False),
+            (b"e", True),
+            (b"f", False),
+            (b"g", True),
+            (b"h", False),
+            (b"i", False),
+        ):
+            _, decision = collector.consume_frame(frame=frame, is_speech=is_speech)
+            if decision is not None:
+                break
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.reason, "speech_run_too_short")
+        self.assertEqual(decision.speech_ms, 80)
+        self.assertEqual(decision.longest_speech_run_ms, 20)
 
 
 if __name__ == "__main__":

@@ -158,7 +158,7 @@ check_runtime_user() {
 
 check_runtime_files() {
   local backend_url trigger_mode trigger_socket
-  local vad_aggressiveness vad_frame_ms vad_min_speech_ms vad_trailing_silence_ms
+  local vad_aggressiveness vad_frame_ms vad_min_speech_ms vad_min_speech_run_ms vad_trailing_silence_ms
   local vad_max_utterance_ms vad_cooldown_ms vad_energy_threshold
 
   if [[ -x "$PUSH_TO_TALK_HELPER" ]]; then
@@ -291,6 +291,19 @@ check_runtime_files() {
     fail "invalid KAI_VAD_MIN_SPEECH_MS in $EDGE_ENV_FILE: ${vad_min_speech_ms:-<blank>}"
   fi
 
+  vad_min_speech_run_ms="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_VAD_MIN_SPEECH_RUN_MS:-}"
+    ) 2>/dev/null || true
+  )"
+  if is_positive_int "$vad_min_speech_run_ms"; then
+    ok "VAD minimum speech run configured: ${vad_min_speech_run_ms}ms"
+  else
+    fail "invalid KAI_VAD_MIN_SPEECH_RUN_MS in $EDGE_ENV_FILE: ${vad_min_speech_run_ms:-<blank>}"
+  fi
+
   vad_trailing_silence_ms="$(
     (
       # shellcheck source=/dev/null
@@ -345,6 +358,9 @@ check_runtime_files() {
 
   if is_positive_int "$vad_min_speech_ms" && is_positive_int "$vad_max_utterance_ms" && [[ "$vad_max_utterance_ms" -le "$vad_min_speech_ms" ]]; then
     fail "KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS"
+  fi
+  if is_positive_int "$vad_min_speech_run_ms" && is_positive_int "$vad_max_utterance_ms" && [[ "$vad_max_utterance_ms" -le "$vad_min_speech_run_ms" ]]; then
+    fail "KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_RUN_MS"
   fi
 
   warn "VAD runtime behavior is not fully validated by kai-doctor; run a live speech test with the physical mute switch"

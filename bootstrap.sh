@@ -93,10 +93,11 @@ load_config() {
   : "${KAI_HTTP_TIMEOUT_SECONDS:=60}"
   : "${KAI_TRIGGER_MODE:=manual}"
   : "${KAI_TRIGGER_SOCKET_PATH:=/run/kai-edge/trigger.sock}"
-  : "${KAI_VAD_AGGRESSIVENESS:=2}"
+  : "${KAI_VAD_AGGRESSIVENESS:=3}"
   : "${KAI_VAD_FRAME_MS:=30}"
   : "${KAI_VAD_PRE_ROLL_MS:=250}"
-  : "${KAI_VAD_MIN_SPEECH_MS:=350}"
+  : "${KAI_VAD_MIN_SPEECH_MS:=1200}"
+  : "${KAI_VAD_MIN_SPEECH_RUN_MS:=900}"
   : "${KAI_VAD_TRAILING_SILENCE_MS:=700}"
   : "${KAI_VAD_MAX_UTTERANCE_MS:=10000}"
   : "${KAI_VAD_COOLDOWN_MS:=400}"
@@ -209,6 +210,7 @@ render_edge_env() {
     -e "s|__KAI_VAD_FRAME_MS__|$(escape_sed_replacement "$KAI_VAD_FRAME_MS")|g" \
     -e "s|__KAI_VAD_PRE_ROLL_MS__|$(escape_sed_replacement "$KAI_VAD_PRE_ROLL_MS")|g" \
     -e "s|__KAI_VAD_MIN_SPEECH_MS__|$(escape_sed_replacement "$KAI_VAD_MIN_SPEECH_MS")|g" \
+    -e "s|__KAI_VAD_MIN_SPEECH_RUN_MS__|$(escape_sed_replacement "$KAI_VAD_MIN_SPEECH_RUN_MS")|g" \
     -e "s|__KAI_VAD_TRAILING_SILENCE_MS__|$(escape_sed_replacement "$KAI_VAD_TRAILING_SILENCE_MS")|g" \
     -e "s|__KAI_VAD_MAX_UTTERANCE_MS__|$(escape_sed_replacement "$KAI_VAD_MAX_UTTERANCE_MS")|g" \
     -e "s|__KAI_VAD_COOLDOWN_MS__|$(escape_sed_replacement "$KAI_VAD_COOLDOWN_MS")|g" \

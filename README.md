@@ -95,7 +95,7 @@ vad mode arms the microphone and loops:
 1. stay in `listening` while reading short audio frames.
 2. transition to `recording` when speech is detected.
 3. stop on trailing silence or max utterance duration.
-4. reject short/noise bursts below minimum speech duration.
+4. reject short/noise bursts below minimum speech duration or speech-run gate.
 5. send accepted wav to `${KAI_CORE_BASE_URL}/audio`.
 6. play returned audio when present.
 7. return to `idle`, apply cooldown, and re-arm.
@@ -194,6 +194,7 @@ vad tuning keys:
 - `KAI_VAD_FRAME_MS`
 - `KAI_VAD_PRE_ROLL_MS`
 - `KAI_VAD_MIN_SPEECH_MS`
+- `KAI_VAD_MIN_SPEECH_RUN_MS`
 - `KAI_VAD_TRAILING_SILENCE_MS`
 - `KAI_VAD_MAX_UTTERANCE_MS`
 - `KAI_VAD_COOLDOWN_MS`

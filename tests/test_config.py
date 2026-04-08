@@ -88,6 +88,15 @@ class ConfigTests(unittest.TestCase):
                 }
             )
 
+    def test_build_edge_config_requires_vad_max_utterance_greater_than_min_speech_run(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(
+                file_settings={
+                    "KAI_VAD_MIN_SPEECH_RUN_MS": "1000",
+                    "KAI_VAD_MAX_UTTERANCE_MS": "1000",
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

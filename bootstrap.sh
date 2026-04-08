@@ -75,7 +75,6 @@ load_config() {
   : "${KAI_LOG_DIR:=/var/log/kai}"
   : "${CREATE_VENV:=1}"
   : "${VENV_DIR:=$KAI_ROOT/venv}"
-  : "${INSTALL_WEBRTCVAD:=1}"
   : "${INSTALL_AVAHI:=1}"
   : "${INSTALL_RASPAP:=1}"
   : "${RASPAP_INSTALL_URL:=https://install.raspap.com}"
@@ -640,49 +639,56 @@ ensure_python_venv() {
   note_change "created python venv at $VENV_DIR"
 }
 
-ensure_webrtcvad_dependency() {
+ensure_runtime_python_dependencies() {
+  local requirements_file="$SCRIPT_DIR/requirements-runtime.txt"
   local venv_python="$VENV_DIR/bin/python"
 
-  if [[ "$INSTALL_WEBRTCVAD" != "1" ]]; then
-    note_status "webrtcvad installation disabled in config.env"
+  if [[ "$CREATE_VENV" != "1" ]]; then
+    warn "cannot install runtime python dependencies automatically because CREATE_VENV=0"
+    note_status "runtime python dependency sync skipped (CREATE_VENV=0)"
+    note_manual "set CREATE_VENV=1 to sync runtime python dependencies during bootstrap"
     return 0
   fi
 
-  if [[ "$CREATE_VENV" != "1" ]]; then
-    warn "cannot install webrtcvad automatically because CREATE_VENV=0"
-    note_status "webrtcvad auto-install skipped (CREATE_VENV=0); daemon may use energy fallback VAD"
-    note_manual "set CREATE_VENV=1 to auto-install webrtcvad during bootstrap"
-    return 0
+  if [[ ! -f "$requirements_file" ]]; then
+    die "missing runtime python requirements file: $requirements_file"
   fi
 
   if [[ ! -x "$venv_python" ]]; then
-    warn "cannot install webrtcvad because venv python is missing: $venv_python"
-    note_status "webrtcvad auto-install skipped; daemon may use energy fallback VAD"
+    warn "cannot install runtime python dependencies because venv python is missing: $venv_python"
+    note_status "runtime python dependency sync skipped"
     return 0
+  fi
+
+  log "syncing runtime python dependencies from $requirements_file"
+  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input -r "$requirements_file" >/dev/null 2>&1; then
+    note_change "synced runtime python dependencies into $VENV_DIR"
+  else
+    warn "could not sync runtime python dependencies from $requirements_file"
+    note_status "runtime python dependency sync failed; daemon may fall back where supported"
+    note_manual "inspect dependency install manually with: sudo -u $KAI_USER $venv_python -m pip install -r $requirements_file"
   fi
 
   if runuser -u "$KAI_USER" -- "$venv_python" -c 'import webrtcvad' >/dev/null 2>&1; then
-    note_status "webrtcvad already available in $VENV_DIR"
-    return 0
-  fi
-
-  log "installing webrtcvad dependency into $VENV_DIR"
-  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input webrtcvad-wheels >/dev/null 2>&1; then
-    note_change "installed webrtcvad-wheels into $VENV_DIR"
     note_status "webrtcvad is available for VAD mode"
     return 0
   fi
 
-  warn "webrtcvad-wheels install failed, trying source package"
+  if [[ "$KAI_TRIGGER_MODE" != "vad" ]]; then
+    note_status "webrtcvad is not installed; energy fallback will be used if VAD mode is enabled"
+    return 0
+  fi
+
+  warn "webrtcvad missing after dependency sync; trying source fallback package"
   if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input webrtcvad >/dev/null 2>&1; then
-    note_change "installed webrtcvad into $VENV_DIR"
+    note_change "installed webrtcvad source fallback into $VENV_DIR"
     note_status "webrtcvad is available for VAD mode"
     return 0
   fi
 
-  warn "could not install webrtcvad into $VENV_DIR"
+  warn "could not install webrtcvad source fallback into $VENV_DIR"
   note_status "webrtcvad install failed; daemon will use energy fallback VAD"
-  note_manual "inspect venv pip install manually with: sudo -u $KAI_USER $venv_python -m pip install webrtcvad-wheels"
+  note_manual "inspect VAD package install manually with: sudo -u $KAI_USER $venv_python -m pip install webrtcvad"
   return 0
 }
 
@@ -884,7 +890,6 @@ render_doctor_config() {
     printf 'KAI_LOG_DIR=%q\n' "$KAI_LOG_DIR"
     printf 'KAI_VENV_DIR=%q\n' "$VENV_DIR"
     printf 'CREATE_VENV=%q\n' "$CREATE_VENV"
-    printf 'INSTALL_WEBRTCVAD=%q\n' "$INSTALL_WEBRTCVAD"
     printf 'INSTALL_AVAHI=%q\n' "$INSTALL_AVAHI"
     printf 'INSTALL_RASPAP=%q\n' "$INSTALL_RASPAP"
     printf 'RASPAP_INSTALL_URL=%q\n' "$RASPAP_INSTALL_URL"
@@ -1014,7 +1019,7 @@ main() {
   fi
   ensure_base_directories
   ensure_python_venv
-  ensure_webrtcvad_dependency
+  ensure_runtime_python_dependencies
   install_ssh_hardening
   reload_ssh_if_needed
   enable_avahi_if_requested

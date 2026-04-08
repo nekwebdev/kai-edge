@@ -13,7 +13,6 @@ KAI_STATE_DIR="/var/lib/kai"
 KAI_LOG_DIR="/var/log/kai"
 KAI_VENV_DIR="/opt/kai/venv"
 CREATE_VENV="1"
-INSTALL_WEBRTCVAD="1"
 INSTALL_AVAHI="1"
 INSTALL_RASPAP="1"
 RASPAP_INSTALL_URL="https://install.raspap.com"
@@ -677,13 +676,8 @@ check_python_venv() {
 }
 
 check_webrtcvad_dependency() {
-  if [[ "$INSTALL_WEBRTCVAD" != "1" ]]; then
-    ok "webrtcvad install disabled in bootstrap config"
-    return 0
-  fi
-
   if [[ "$CREATE_VENV" != "1" ]]; then
-    warn "CREATE_VENV=0; webrtcvad auto-install is disabled"
+    warn "CREATE_VENV=0; runtime python dependency sync is disabled"
     return 0
   fi
 

@@ -91,6 +91,8 @@ load_config() {
   : "${KAI_RECORD_SECONDS:=5}"
   : "${KAI_AUDIO_SAMPLE_RATE:=16000}"
   : "${KAI_HTTP_TIMEOUT_SECONDS:=60}"
+  : "${KAI_TRIGGER_SOCKET_PATH:=/run/kai-edge/trigger.sock}"
+  : "${ENABLE_KAI_EDGE_SERVICE:=0}"
   : "${KAI_RECORD_DEVICE:=}"
   : "${KAI_PLAYBACK_DEVICE:=}"
   : "${APT_PACKAGES_EXTRA:=}"
@@ -110,6 +112,9 @@ load_config() {
   AUDIO_HELPER_DEST="$KAI_BIN_DIR/kai-audio-check"
   DOCTOR_HELPER_DEST="$KAI_BIN_DIR/kai-doctor"
   PUSH_TO_TALK_DEST="$KAI_BIN_DIR/kai-push-to-talk"
+  EDGE_DAEMON_DEST="$KAI_BIN_DIR/kai-edge-daemon"
+  EDGE_TRIGGER_DEST="$KAI_BIN_DIR/kai-edge-trigger"
+  EDGE_PACKAGE_DEST="$KAI_APP_DIR/kai_edge"
   DOCTOR_CONFIG_DEST="/etc/kai/bootstrap.env"
   EDGE_ENV_DEST="$KAI_CONFIG_DIR/edge.env"
 }
@@ -158,6 +163,7 @@ render_systemd_unit() {
     -e "s|__KAI_USER__|$(escape_sed_replacement "$KAI_USER")|g" \
     -e "s|__KAI_GROUP__|$(escape_sed_replacement "$KAI_GROUP")|g" \
     -e "s|__KAI_APP_DIR__|$(escape_sed_replacement "$KAI_APP_DIR")|g" \
+    -e "s|__KAI_BIN_DIR__|$(escape_sed_replacement "$KAI_BIN_DIR")|g" \
     -e "s|__KAI_CONFIG_DIR__|$(escape_sed_replacement "$KAI_CONFIG_DIR")|g" \
     -e "s|__KAI_STATE_DIR__|$(escape_sed_replacement "$KAI_STATE_DIR")|g" \
     -e "s|__KAI_LOG_DIR__|$(escape_sed_replacement "$KAI_LOG_DIR")|g" \
@@ -173,6 +179,7 @@ render_edge_env() {
     -e "s|__KAI_RECORD_SECONDS__|$(escape_sed_replacement "$KAI_RECORD_SECONDS")|g" \
     -e "s|__KAI_AUDIO_SAMPLE_RATE__|$(escape_sed_replacement "$KAI_AUDIO_SAMPLE_RATE")|g" \
     -e "s|__KAI_HTTP_TIMEOUT_SECONDS__|$(escape_sed_replacement "$KAI_HTTP_TIMEOUT_SECONDS")|g" \
+    -e "s|__KAI_TRIGGER_SOCKET_PATH__|$(escape_sed_replacement "$KAI_TRIGGER_SOCKET_PATH")|g" \
     -e "s|__KAI_RECORD_DEVICE__|$(escape_sed_replacement "$KAI_RECORD_DEVICE")|g" \
     -e "s|__KAI_PLAYBACK_DEVICE__|$(escape_sed_replacement "$KAI_PLAYBACK_DEVICE")|g" \
     "$template" > "$output"
@@ -697,12 +704,77 @@ install_audio_helper() {
   fi
 }
 
+install_runtime_python_package() {
+  local src_dir="$SCRIPT_DIR/kai_edge"
+  local output
+
+  [[ -d "$src_dir" ]] || die "missing runtime package directory: $src_dir"
+  install -d -m 0755 -o "$KAI_USER" -g "$KAI_GROUP" "$EDGE_PACKAGE_DEST"
+
+  output="$(rsync -rlpt --delete --checksum --itemize-changes "$src_dir/" "$EDGE_PACKAGE_DEST/")"
+  chown -R "$KAI_USER:$KAI_GROUP" "$EDGE_PACKAGE_DEST"
+
+  if [[ -n "$output" ]]; then
+    note_change "synced runtime package to $EDGE_PACKAGE_DEST"
+  else
+    log "runtime package already current: $EDGE_PACKAGE_DEST"
+  fi
+}
+
 install_push_to_talk_helper() {
   local src="$SCRIPT_DIR/scripts/kai-push-to-talk.py"
   [[ -f "$src" ]] || die "missing push-to-talk helper: $src"
   if install_managed_file "$src" "$PUSH_TO_TALK_DEST" 0755 "$KAI_USER" "$KAI_GROUP"; then
     :
   fi
+}
+
+install_edge_daemon_helper() {
+  local src="$SCRIPT_DIR/scripts/kai-edge-daemon.py"
+  [[ -f "$src" ]] || die "missing edge daemon helper: $src"
+  if install_managed_file "$src" "$EDGE_DAEMON_DEST" 0755 "$KAI_USER" "$KAI_GROUP"; then
+    :
+  fi
+}
+
+install_edge_trigger_helper() {
+  local src="$SCRIPT_DIR/scripts/kai-edge-trigger.py"
+  [[ -f "$src" ]] || die "missing edge trigger helper: $src"
+  if install_managed_file "$src" "$EDGE_TRIGGER_DEST" 0755 "$KAI_USER" "$KAI_GROUP"; then
+    :
+  fi
+}
+
+ensure_kai_edge_service_if_requested() {
+  local enabled_state active_state
+
+  if [[ ! -f "$SYSTEMD_UNIT_DEST" ]]; then
+    die "cannot manage kai-edge.service because the unit file is missing: $SYSTEMD_UNIT_DEST"
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found; cannot manage kai-edge.service runtime state"
+    note_manual "manage kai-edge.service manually because systemctl is unavailable"
+    return 0
+  fi
+
+  if [[ "$ENABLE_KAI_EDGE_SERVICE" == "1" ]]; then
+    log "ensuring kai-edge.service is enabled and active"
+    if systemctl enable --now kai-edge.service; then
+      note_change "ensured kai-edge.service is enabled and active"
+      return 0
+    fi
+
+    warn "could not enable kai-edge.service automatically"
+    note_manual "enable and start kai-edge.service manually with: sudo systemctl enable --now kai-edge.service"
+    return 1
+  fi
+
+  enabled_state="$(systemctl is-enabled kai-edge.service 2>/dev/null || true)"
+  active_state="$(systemctl is-active kai-edge.service 2>/dev/null || true)"
+  note_status "kai-edge.service install complete (enabled: ${enabled_state:-disabled}, active: ${active_state:-inactive})"
+  note_manual "service autostart is disabled by ENABLE_KAI_EDGE_SERVICE=0; start it manually with: sudo systemctl start kai-edge.service"
+  return 0
 }
 
 install_edge_env() {
@@ -725,6 +797,8 @@ render_doctor_config() {
     printf 'KAI_USER=%q\n' "$KAI_USER"
     printf 'KAI_GROUP=%q\n' "$KAI_GROUP"
     printf 'KAI_ROOT=%q\n' "$KAI_ROOT"
+    printf 'KAI_APP_DIR=%q\n' "$KAI_APP_DIR"
+    printf 'KAI_BIN_DIR=%q\n' "$KAI_BIN_DIR"
     printf 'KAI_CONFIG_DIR=%q\n' "$KAI_CONFIG_DIR"
     printf 'KAI_STATE_DIR=%q\n' "$KAI_STATE_DIR"
     printf 'KAI_LOG_DIR=%q\n' "$KAI_LOG_DIR"
@@ -738,9 +812,13 @@ render_doctor_config() {
     printf 'RASPAP_AP_DHCP_RANGE=%q\n' "$RASPAP_AP_DHCP_RANGE"
     printf 'RASPAP_ENABLE_FALLBACK_AP=%q\n' "$RASPAP_ENABLE_FALLBACK_AP"
     printf 'RASPAP_ADMIN_USER=%q\n' "$RASPAP_ADMIN_USER"
+    printf 'ENABLE_KAI_EDGE_SERVICE=%q\n' "$ENABLE_KAI_EDGE_SERVICE"
     printf 'SSH_SNIPPET=%q\n' "$SSH_SNIPPET_DEST"
     printf 'SYSTEMD_UNIT=%q\n' "$SYSTEMD_UNIT_DEST"
     printf 'EDGE_ENV_FILE=%q\n' "$EDGE_ENV_DEST"
+    printf 'EDGE_DAEMON_HELPER=%q\n' "$EDGE_DAEMON_DEST"
+    printf 'EDGE_TRIGGER_HELPER=%q\n' "$EDGE_TRIGGER_DEST"
+    printf 'EDGE_RUNTIME_PACKAGE_DIR=%q\n' "$EDGE_PACKAGE_DEST"
     printf 'PUSH_TO_TALK_HELPER=%q\n' "$PUSH_TO_TALK_DEST"
   } > "$output"
 }
@@ -762,11 +840,11 @@ install_doctor_helper() {
 }
 
 prepare_manual_follow_up() {
-  note_manual "replace $KAI_APP_DIR/run-edge-service with the real pi-side launcher, then enable kai-edge.service when ready"
   note_manual "review $SSH_SNIPPET_DEST before making stronger ssh changes that could affect your access path"
   note_manual "run sudo $DOCTOR_HELPER_DEST after bootstrap to validate node readiness"
   note_manual "run $AUDIO_HELPER_DEST after the target microphone and speaker hardware are attached"
   note_manual "run sudo -u $KAI_USER $PUSH_TO_TALK_DEST for a manual one-shot record -> /audio -> playback test"
+  note_manual "run sudo -u $KAI_USER $EDGE_TRIGGER_DEST to trigger one daemon-managed push-to-talk interaction"
 
   if [[ "$INSTALL_RASPAP" == "1" ]]; then
     note_manual "join the fallback AP SSID \"$RASPAP_AP_SSID\" to reach the setup network if upstream wifi is unavailable"
@@ -776,9 +854,16 @@ prepare_manual_follow_up() {
 
   if [[ -z "$KAI_CORE_BASE_URL" ]]; then
     note_status "kai-core base URL is not configured yet"
-    note_manual "set KAI_CORE_BASE_URL in $CONFIG_FILE and rerun bootstrap before using $PUSH_TO_TALK_DEST"
+    note_manual "set KAI_CORE_BASE_URL in $CONFIG_FILE and rerun bootstrap before using $EDGE_TRIGGER_DEST or $PUSH_TO_TALK_DEST"
   else
     note_status "kai-core base URL configured for push-to-talk: $KAI_CORE_BASE_URL"
+  fi
+
+  if [[ "$ENABLE_KAI_EDGE_SERVICE" == "1" ]]; then
+    note_status "kai-edge.service will be enabled and started by bootstrap"
+  else
+    note_status "kai-edge.service will be installed but left disabled (ENABLE_KAI_EDGE_SERVICE=0)"
+    note_manual "enable and start kai-edge.service manually with: sudo systemctl enable --now kai-edge.service"
   fi
 
   if [[ "$INSTALL_AVAHI" == "1" ]]; then
@@ -823,6 +908,9 @@ print_summary() {
   printf -- '- %s\n' "$SSH_SNIPPET_DEST"
   printf -- '- %s\n' "$SYSTEMD_UNIT_DEST"
   printf -- '- %s\n' "$EDGE_ENV_DEST"
+  printf -- '- %s\n' "$EDGE_PACKAGE_DEST"
+  printf -- '- %s\n' "$EDGE_DAEMON_DEST"
+  printf -- '- %s\n' "$EDGE_TRIGGER_DEST"
   printf -- '- %s\n' "$PUSH_TO_TALK_DEST"
 }
 
@@ -843,11 +931,15 @@ main() {
   install_ssh_hardening
   reload_ssh_if_needed
   enable_avahi_if_requested
+  install_audio_helper
+  install_runtime_python_package
+  install_push_to_talk_helper
+  install_edge_daemon_helper
+  install_edge_trigger_helper
+  install_edge_env
   install_systemd_unit
   reload_systemd_if_needed
-  install_audio_helper
-  install_push_to_talk_helper
-  install_edge_env
+  ensure_kai_edge_service_if_requested || true
   install_doctor_config
   install_doctor_helper
   print_summary

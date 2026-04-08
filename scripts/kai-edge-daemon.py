@@ -21,7 +21,7 @@ def prepare_import_path() -> None:
 
 prepare_import_path()
 
-from kai_edge.cli.push_to_talk import main  # noqa: E402
+from kai_edge.cli.daemon import main  # noqa: E402
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ DOCTOR_CONFIG_FILE="${KAI_DOCTOR_CONFIG_FILE:-/etc/kai/bootstrap.env}"
 KAI_USER=""
 KAI_GROUP=""
 KAI_ROOT="/opt/kai"
+KAI_APP_DIR="/opt/kai/app"
+KAI_BIN_DIR="/opt/kai/bin"
 KAI_CONFIG_DIR="/etc/kai"
 KAI_STATE_DIR="/var/lib/kai"
 KAI_LOG_DIR="/var/log/kai"
@@ -22,7 +24,11 @@ RASPAP_ADMIN_USER="admin"
 SSH_SNIPPET="/etc/ssh/sshd_config.d/60-kai-hardening.conf"
 SYSTEMD_UNIT="/etc/systemd/system/kai-edge.service"
 EDGE_ENV_FILE="/etc/kai/edge.env"
+EDGE_RUNTIME_PACKAGE_DIR="/opt/kai/app/kai_edge"
+EDGE_DAEMON_HELPER="/opt/kai/bin/kai-edge-daemon"
+EDGE_TRIGGER_HELPER="/opt/kai/bin/kai-edge-trigger"
 PUSH_TO_TALK_HELPER="/opt/kai/bin/kai-push-to-talk"
+ENABLE_KAI_EDGE_SERVICE="0"
 
 ok_count=0
 warn_count=0
@@ -105,6 +111,8 @@ check_command() {
 
 check_required_directories() {
   check_directory "$KAI_ROOT"
+  check_directory "$KAI_APP_DIR"
+  check_directory "$KAI_BIN_DIR"
   check_directory "$KAI_CONFIG_DIR"
   check_directory "$KAI_STATE_DIR"
   check_directory "$KAI_LOG_DIR"
@@ -141,12 +149,30 @@ check_runtime_user() {
 }
 
 check_runtime_files() {
-  local backend_url
+  local backend_url trigger_socket
 
   if [[ -x "$PUSH_TO_TALK_HELPER" ]]; then
     ok "push-to-talk helper present: $PUSH_TO_TALK_HELPER"
   else
     fail "push-to-talk helper missing: $PUSH_TO_TALK_HELPER"
+  fi
+
+  if [[ -x "$EDGE_DAEMON_HELPER" ]]; then
+    ok "edge daemon helper present: $EDGE_DAEMON_HELPER"
+  else
+    fail "edge daemon helper missing: $EDGE_DAEMON_HELPER"
+  fi
+
+  if [[ -x "$EDGE_TRIGGER_HELPER" ]]; then
+    ok "edge trigger helper present: $EDGE_TRIGGER_HELPER"
+  else
+    fail "edge trigger helper missing: $EDGE_TRIGGER_HELPER"
+  fi
+
+  if [[ -d "$EDGE_RUNTIME_PACKAGE_DIR" ]]; then
+    ok "edge runtime package present: $EDGE_RUNTIME_PACKAGE_DIR"
+  else
+    fail "edge runtime package missing: $EDGE_RUNTIME_PACKAGE_DIR"
   fi
 
   if [[ -f "$EDGE_ENV_FILE" ]]; then
@@ -168,6 +194,20 @@ check_runtime_files() {
     ok "kai-core base URL configured: $backend_url"
   else
     warn "kai-core base URL is blank in $EDGE_ENV_FILE"
+  fi
+
+  trigger_socket="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_SOCKET_PATH:-/run/kai-edge/trigger.sock}"
+    ) 2>/dev/null || true
+  )"
+
+  if [[ -n "$trigger_socket" ]]; then
+    ok "edge trigger socket configured: $trigger_socket"
+  else
+    fail "edge trigger socket path is blank in $EDGE_ENV_FILE"
   fi
 }
 
@@ -378,11 +418,17 @@ check_raspap_state() {
 }
 
 check_systemd_state() {
-  local enabled_state active_state
+  local enabled_state active_state trigger_socket
 
   if [[ ! -f "$SYSTEMD_UNIT" ]]; then
     fail "kai-edge.service unit file missing: $SYSTEMD_UNIT"
     return 0
+  fi
+
+  if grep -Fq "kai-edge-daemon" "$SYSTEMD_UNIT"; then
+    ok "kai-edge.service uses the runtime daemon entrypoint"
+  else
+    fail "kai-edge.service does not reference kai-edge-daemon (placeholder unit or stale config)"
   fi
 
   if ! have_command systemctl; then
@@ -394,14 +440,53 @@ check_systemd_state() {
   enabled_state="$(systemctl is-enabled kai-edge.service 2>/dev/null || true)"
   active_state="$(systemctl is-active kai-edge.service 2>/dev/null || true)"
 
-  case "$enabled_state" in
-    enabled|enabled-runtime)
-      ok "kai-edge.service installed and enabled (active: ${active_state:-unknown})"
-      ;;
-    *)
-      ok "kai-edge.service installed (enabled: ${enabled_state:-disabled}, active: ${active_state:-inactive})"
-      ;;
-  esac
+  if [[ "$ENABLE_KAI_EDGE_SERVICE" == "1" ]]; then
+    case "$enabled_state" in
+      enabled|enabled-runtime)
+        ok "kai-edge.service enabled as expected"
+        ;;
+      *)
+        fail "kai-edge.service should be enabled (ENABLE_KAI_EDGE_SERVICE=1), but state is: ${enabled_state:-disabled}"
+        ;;
+    esac
+
+    if [[ "$active_state" == "active" ]]; then
+      ok "kai-edge.service active as expected"
+    else
+      fail "kai-edge.service should be active (ENABLE_KAI_EDGE_SERVICE=1), but state is: ${active_state:-inactive}"
+    fi
+  else
+    if [[ "$active_state" == "active" ]]; then
+      ok "kai-edge.service active (manual or prior enable)"
+    elif [[ "$enabled_state" == "enabled" || "$enabled_state" == "enabled-runtime" ]]; then
+      warn "kai-edge.service is enabled but not active (state: ${active_state:-inactive})"
+    else
+      ok "kai-edge.service installed and inactive by default (ENABLE_KAI_EDGE_SERVICE=0)"
+    fi
+  fi
+
+  if [[ "$active_state" != "active" ]]; then
+    return 0
+  fi
+
+  trigger_socket="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_SOCKET_PATH:-/run/kai-edge/trigger.sock}"
+    ) 2>/dev/null || true
+  )"
+
+  if [[ -z "$trigger_socket" ]]; then
+    fail "cannot verify daemon trigger socket because KAI_TRIGGER_SOCKET_PATH is empty"
+    return 0
+  fi
+
+  if [[ -S "$trigger_socket" ]]; then
+    ok "daemon trigger socket present: $trigger_socket"
+  else
+    fail "daemon trigger socket missing while service is active: $trigger_socket"
+  fi
 }
 
 check_python_venv() {

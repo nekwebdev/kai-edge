@@ -108,6 +108,8 @@ if it is missing or the sample rate is unsupported, it falls back to an internal
 
 this keeps deployment simple and avoids heavyweight speech stacks while still giving a practical VAD loop for pi testing.
 
+bootstrap now installs `webrtcvad` into the managed venv by default (`INSTALL_WEBRTCVAD="1"`), and the systemd unit runs the daemon with that venv python.
+
 ## managed paths on the pi
 
 - `/opt/kai`: app root, helper scripts, and optional venv
@@ -135,6 +137,7 @@ this keeps deployment simple and avoids heavyweight speech stacks while still gi
 - installs and manages raspap by default (configurable via `INSTALL_RASPAP`)
 - creates base directories
 - optionally creates a python venv
+- optionally installs `webrtcvad` into the managed venv (`INSTALL_WEBRTCVAD`)
 - ensures runtime user is in the `audio` group
 - installs managed ssh hardening and validates `sshd -t`
 - optionally enables `avahi-daemon` for `kai.local`
@@ -303,6 +306,7 @@ sudo /opt/kai/bin/kai-doctor
 - trigger socket expectations when service is active
 - VAD config shape checks when `KAI_TRIGGER_MODE=vad`
 - python venv and alsa device visibility
+- webrtcvad availability in the managed venv when enabled
 
 in VAD mode, doctor explicitly does not claim end-to-end speech quality; it only validates safe/static runtime shape.
 

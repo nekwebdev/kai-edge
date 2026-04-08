@@ -15,7 +15,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=KAI_STATE_DIR=__KAI_STATE_DIR__
 Environment=KAI_LOG_DIR=__KAI_LOG_DIR__
 EnvironmentFile=-__KAI_CONFIG_DIR__/edge.env
-ExecStart=__KAI_BIN_DIR__/kai-edge-daemon --env-file __KAI_CONFIG_DIR__/edge.env
+ExecStart=__KAI_RUNTIME_PYTHON__ __KAI_BIN_DIR__/kai-edge-daemon --env-file __KAI_CONFIG_DIR__/edge.env
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes

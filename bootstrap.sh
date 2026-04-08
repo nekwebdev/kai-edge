@@ -75,6 +75,7 @@ load_config() {
   : "${KAI_LOG_DIR:=/var/log/kai}"
   : "${CREATE_VENV:=1}"
   : "${VENV_DIR:=$KAI_ROOT/venv}"
+  : "${INSTALL_WEBRTCVAD:=1}"
   : "${INSTALL_AVAHI:=1}"
   : "${INSTALL_RASPAP:=1}"
   : "${RASPAP_INSTALL_URL:=https://install.raspap.com}"
@@ -122,6 +123,12 @@ load_config() {
 
   if [[ -z "${KAI_GROUP:-}" ]]; then
     KAI_GROUP="$(id -gn "$KAI_USER")"
+  fi
+
+  if [[ "$CREATE_VENV" == "1" ]]; then
+    KAI_RUNTIME_PYTHON_BIN="$VENV_DIR/bin/python"
+  else
+    KAI_RUNTIME_PYTHON_BIN="python3"
   fi
 
   SSH_SNIPPET_DEST="/etc/ssh/sshd_config.d/60-kai-hardening.conf"
@@ -181,6 +188,7 @@ render_systemd_unit() {
     -e "s|__KAI_GROUP__|$(escape_sed_replacement "$KAI_GROUP")|g" \
     -e "s|__KAI_APP_DIR__|$(escape_sed_replacement "$KAI_APP_DIR")|g" \
     -e "s|__KAI_BIN_DIR__|$(escape_sed_replacement "$KAI_BIN_DIR")|g" \
+    -e "s|__KAI_RUNTIME_PYTHON__|$(escape_sed_replacement "$KAI_RUNTIME_PYTHON_BIN")|g" \
     -e "s|__KAI_CONFIG_DIR__|$(escape_sed_replacement "$KAI_CONFIG_DIR")|g" \
     -e "s|__KAI_STATE_DIR__|$(escape_sed_replacement "$KAI_STATE_DIR")|g" \
     -e "s|__KAI_LOG_DIR__|$(escape_sed_replacement "$KAI_LOG_DIR")|g" \
@@ -632,6 +640,52 @@ ensure_python_venv() {
   note_change "created python venv at $VENV_DIR"
 }
 
+ensure_webrtcvad_dependency() {
+  local venv_python="$VENV_DIR/bin/python"
+
+  if [[ "$INSTALL_WEBRTCVAD" != "1" ]]; then
+    note_status "webrtcvad installation disabled in config.env"
+    return 0
+  fi
+
+  if [[ "$CREATE_VENV" != "1" ]]; then
+    warn "cannot install webrtcvad automatically because CREATE_VENV=0"
+    note_status "webrtcvad auto-install skipped (CREATE_VENV=0); daemon may use energy fallback VAD"
+    note_manual "set CREATE_VENV=1 to auto-install webrtcvad during bootstrap"
+    return 0
+  fi
+
+  if [[ ! -x "$venv_python" ]]; then
+    warn "cannot install webrtcvad because venv python is missing: $venv_python"
+    note_status "webrtcvad auto-install skipped; daemon may use energy fallback VAD"
+    return 0
+  fi
+
+  if runuser -u "$KAI_USER" -- "$venv_python" -c 'import webrtcvad' >/dev/null 2>&1; then
+    note_status "webrtcvad already available in $VENV_DIR"
+    return 0
+  fi
+
+  log "installing webrtcvad dependency into $VENV_DIR"
+  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input webrtcvad-wheels >/dev/null 2>&1; then
+    note_change "installed webrtcvad-wheels into $VENV_DIR"
+    note_status "webrtcvad is available for VAD mode"
+    return 0
+  fi
+
+  warn "webrtcvad-wheels install failed, trying source package"
+  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input webrtcvad >/dev/null 2>&1; then
+    note_change "installed webrtcvad into $VENV_DIR"
+    note_status "webrtcvad is available for VAD mode"
+    return 0
+  fi
+
+  warn "could not install webrtcvad into $VENV_DIR"
+  note_status "webrtcvad install failed; daemon will use energy fallback VAD"
+  note_manual "inspect venv pip install manually with: sudo -u $KAI_USER $venv_python -m pip install webrtcvad-wheels"
+  return 0
+}
+
 ensure_runtime_user_access() {
   ensure_group_membership "$KAI_USER" audio
 }
@@ -830,6 +884,7 @@ render_doctor_config() {
     printf 'KAI_LOG_DIR=%q\n' "$KAI_LOG_DIR"
     printf 'KAI_VENV_DIR=%q\n' "$VENV_DIR"
     printf 'CREATE_VENV=%q\n' "$CREATE_VENV"
+    printf 'INSTALL_WEBRTCVAD=%q\n' "$INSTALL_WEBRTCVAD"
     printf 'INSTALL_AVAHI=%q\n' "$INSTALL_AVAHI"
     printf 'INSTALL_RASPAP=%q\n' "$INSTALL_RASPAP"
     printf 'RASPAP_INSTALL_URL=%q\n' "$RASPAP_INSTALL_URL"
@@ -959,6 +1014,7 @@ main() {
   fi
   ensure_base_directories
   ensure_python_venv
+  ensure_webrtcvad_dependency
   install_ssh_hardening
   reload_ssh_if_needed
   enable_avahi_if_requested

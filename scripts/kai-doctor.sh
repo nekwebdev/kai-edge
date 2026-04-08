@@ -13,6 +13,7 @@ KAI_STATE_DIR="/var/lib/kai"
 KAI_LOG_DIR="/var/log/kai"
 KAI_VENV_DIR="/opt/kai/venv"
 CREATE_VENV="1"
+INSTALL_WEBRTCVAD="1"
 INSTALL_AVAHI="1"
 INSTALL_RASPAP="1"
 RASPAP_INSTALL_URL="https://install.raspap.com"
@@ -347,15 +348,6 @@ check_runtime_files() {
     fail "KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS"
   fi
 
-  if python3 - <<'PY' >/dev/null 2>&1
-import webrtcvad
-PY
-  then
-    ok "python webrtcvad module available"
-  else
-    warn "python webrtcvad module not found; daemon will use energy fallback detector"
-  fi
-
   warn "VAD runtime behavior is not fully validated by kai-doctor; run a live speech test with the physical mute switch"
 }
 
@@ -684,6 +676,32 @@ check_python_venv() {
   fi
 }
 
+check_webrtcvad_dependency() {
+  if [[ "$INSTALL_WEBRTCVAD" != "1" ]]; then
+    ok "webrtcvad install disabled in bootstrap config"
+    return 0
+  fi
+
+  if [[ "$CREATE_VENV" != "1" ]]; then
+    warn "CREATE_VENV=0; webrtcvad auto-install is disabled"
+    return 0
+  fi
+
+  if [[ ! -x "$KAI_VENV_DIR/bin/python" ]]; then
+    warn "venv python missing; skipping webrtcvad check"
+    return 0
+  fi
+
+  if "$KAI_VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
+import webrtcvad
+PY
+  then
+    ok "webrtcvad available in managed venv"
+  else
+    warn "webrtcvad missing in managed venv; daemon may fall back to energy VAD"
+  fi
+}
+
 count_alsa_devices() {
   local tool=$1
   local output
@@ -751,6 +769,7 @@ main() {
   check_raspap_state
   check_systemd_state
   check_python_venv
+  check_webrtcvad_dependency
   check_audio_visibility
   print_summary
 

@@ -194,6 +194,7 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - optionally enables/starts `kai-edge.service` when `ENABLE_KAI_EDGE_SERVICE="1"`
 - writes `/etc/kai/bootstrap.env` for `kai-doctor`
 - installs `kai-doctor`
+- applies a safety guard that removes invalid fallback AP self-gateway routes on `wlan0`
 
 safe re-runs are handled with managed file comparisons and non-destructive directory setup.
 
@@ -424,6 +425,7 @@ sudo /opt/kai/bin/kai-doctor
 - trigger socket expectations when service is active
 - VAD config shape checks when `KAI_TRIGGER_MODE=vad` or `wakeword`
 - wakeword config and model/keyword path checks when `KAI_TRIGGER_MODE=wakeword`
+- raspap routing safety checks (no AP self-gateway default route on `wlan0`)
 - observability env shape and status artifact path config
 - runtime status artifact readability, mode match, and backend shape checks when service is active
 - managed journald retention config shape when enabled

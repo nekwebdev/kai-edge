@@ -549,7 +549,6 @@ configure_raspap_if_requested() {
     printf '%s\n' '# RaspAP wlan0 configuration'
     printf '%s\n' 'interface wlan0'
     printf 'static ip_address=%s\n' "$RASPAP_AP_SUBNET_CIDR"
-    printf 'static routers=%s\n' "$ap_ip"
     printf 'static domain_name_servers=%s\n' "$RASPAP_AP_DNS_SERVERS"
     if [[ "$RASPAP_ENABLE_FALLBACK_AP" == "1" ]]; then
       printf '%s\n' 'profile static_wlan0'
@@ -569,7 +568,7 @@ configure_raspap_if_requested() {
       --arg ap_dns "$RASPAP_AP_DNS_SERVERS" \
       --arg dhcp_range "$RASPAP_AP_DHCP_RANGE" \
       '.dhcp.wlan0["static ip_address"] = [$ap_ip]
-       | .dhcp.wlan0["static routers"] = [$ap_ip]
+       | .dhcp.wlan0["static routers"] = []
        | .dhcp.wlan0["subnetmask"] = [$ap_mask]
        | .dhcp.wlan0["static domain_name_servers"] = [$ap_dns]
        | .dnsmasq.wlan0["dhcp-range"] = [$dhcp_range]' \
@@ -604,6 +603,31 @@ configure_raspap_if_requested() {
     note_status "raspap fallback AP behavior enabled for wlan0"
   else
     note_status "raspap fallback AP behavior disabled for wlan0"
+  fi
+}
+
+remove_raspap_self_gateway_route_if_present() {
+  local ap_ip
+
+  if [[ "$INSTALL_RASPAP" != "1" ]]; then
+    return 0
+  fi
+
+  ap_ip="${RASPAP_AP_SUBNET_CIDR%/*}"
+  if [[ -z "$ap_ip" ]]; then
+    return 0
+  fi
+
+  if ! ip route show default 2>/dev/null | grep -Fq "via ${ap_ip} dev wlan0"; then
+    return 0
+  fi
+
+  log "removing invalid default route via raspap AP self IP on wlan0: $ap_ip"
+  if ip route del default via "$ap_ip" dev wlan0 >/dev/null 2>&1; then
+    note_change "removed invalid default route via raspap AP self IP on wlan0 ($ap_ip)"
+  else
+    warn "could not remove invalid default route via raspap AP self IP on wlan0: $ap_ip"
+    note_manual "remove invalid AP self gateway route manually with: sudo ip route del default via $ap_ip dev wlan0"
   fi
 }
 
@@ -1257,6 +1281,7 @@ main() {
   ensure_runtime_user_access
   install_raspap_if_requested
   configure_raspap_if_requested
+  remove_raspap_self_gateway_route_if_present
   ensure_raspap_service_if_requested || true
   install_tailscale_if_missing
   if ensure_tailscaled_service; then

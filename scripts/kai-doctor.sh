@@ -717,7 +717,7 @@ check_avahi_state() {
 }
 
 check_raspap_state() {
-  local enabled_state
+  local enabled_state ap_ip
   local expected_fallback=0
 
   if [[ "$INSTALL_RASPAP" != "1" ]]; then
@@ -773,10 +773,17 @@ check_raspap_state() {
   fi
 
   if [[ -f /etc/dhcpcd.conf ]]; then
+    ap_ip="${RASPAP_AP_SUBNET_CIDR%/*}"
     if grep -Fqx "static ip_address=${RASPAP_AP_SUBNET_CIDR}" /etc/dhcpcd.conf; then
       ok "raspap AP static subnet configured: $RASPAP_AP_SUBNET_CIDR"
     else
       fail "raspap AP static subnet does not match expected value: $RASPAP_AP_SUBNET_CIDR"
+    fi
+
+    if [[ -n "$ap_ip" ]] && grep -Fqx "static routers=${ap_ip}" /etc/dhcpcd.conf; then
+      fail "raspap dhcpcd config still sets static routers to AP self IP ($ap_ip), which can hijack default routing"
+    else
+      ok "raspap dhcpcd config does not set AP self IP as static router"
     fi
 
     if [[ "$RASPAP_ENABLE_FALLBACK_AP" == "1" ]]; then
@@ -793,6 +800,12 @@ check_raspap_state() {
     fi
   else
     fail "dhcpcd config missing: /etc/dhcpcd.conf"
+  fi
+
+  if [[ -n "${ap_ip:-}" ]] && ip route show default 2>/dev/null | grep -Fq "via ${ap_ip} dev wlan0"; then
+    fail "default route currently points to AP self IP on wlan0 ($ap_ip); this breaks upstream connectivity and tailscale stability"
+  else
+    ok "default route is not pinned to AP self IP on wlan0"
   fi
 
   if [[ -f /etc/raspap/raspap.auth ]]; then

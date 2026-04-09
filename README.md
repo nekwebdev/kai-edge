@@ -48,6 +48,8 @@ it does not manage:
 │   ├── state.py
 │   ├── vad.py
 │   ├── vad_session.py
+│   ├── wakeword.py
+│   ├── wakeword_runtime.py
 │   └── trigger_client.py
 ├── scripts
 │   ├── kai-audio-check.sh
@@ -61,16 +63,18 @@ it does not manage:
 │   ├── test_core_client.py
 │   ├── test_daemon.py
 │   ├── test_observability.py
-│   └── test_vad_session.py
+│   ├── test_vad_session.py
+│   └── test_wakeword_runtime.py
 └── README.md
 ```
 
 ## runtime architecture
 
-`kai-edge` runs as an explicit pi-side daemon with two trigger modes:
+`kai-edge` runs as an explicit pi-side daemon with three trigger modes:
 
 - `manual`: socket-triggered push-to-talk (existing behavior)
 - `vad`: armed listening with speech start/end detection
+- `wakeword`: passive wake detection that hands off into VAD-bounded utterance capture
 
 the daemon state model is:
 
@@ -107,17 +111,42 @@ vad mode arms the microphone and loops:
 6. play returned audio when present.
 7. return to `idle`, apply cooldown, and re-arm.
 
+### wakeword mode
+
+wakeword mode is layered on top of the same VAD/session logic:
+
+1. stay in `listening` while passively scanning microphone frames for the wake keyword.
+2. when wakeword is detected, start one post-wake utterance capture using the existing VAD collector.
+3. reuse the same VAD gates for speech start, pre-roll, trailing silence stop, max duration stop, and accept/reject thresholds.
+4. if speech does not start before timeout, discard and re-arm wake listening.
+5. send accepted wav to `${KAI_CORE_BASE_URL}/audio`.
+6. play returned audio when present.
+7. return to `idle`, apply cooldown, and re-arm passive wake listening.
+
 logs include mode selection, arm state, speech start/end, accept/reject reason, sending/speaking/idle transitions, and errors.
-the daemon also emits a periodic observability summary with counters (interactions, accepted/rejected, stop/rejection reasons, error count, and utterance duration stats).
+the daemon also emits a periodic observability summary with counters (interactions, accepted/rejected, wake detections, wake timeouts, retrigger suppressions, stop/rejection reasons, error count, and utterance duration stats).
 
 when enabled, the daemon writes a runtime status artifact to `/run/kai-edge/status.json` so operators and `kai-doctor` can inspect current state and counters without scraping logs.
 
-## vad implementation choice
+## backend choices
 
 the daemon prefers the lightweight `webrtcvad` python module when available.
 if it is missing or the sample rate is unsupported, it falls back to an internal energy-threshold detector.
 
-this keeps deployment simple and avoids heavyweight speech stacks while still giving a practical VAD loop for pi testing.
+for wakeword detection, the daemon uses `pvporcupine` (picovoice porcupine):
+
+- practical on raspberry pi with low runtime cpu overhead
+- local/offline inference at runtime
+- stable python integration
+- explicit model/keyword configuration surface for operators
+
+tradeoffs for porcupine in this phase:
+
+- requires `KAI_WAKEWORD_ACCESS_KEY`
+- custom keyword/model files must be managed when not using a built-in keyword
+- wakeword quality still depends on mic placement, gain, and room noise
+
+this keeps deployment simple and avoids heavyweight speech stacks while still giving a practical daily-use wake + utterance loop for pi testing.
 
 bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` into the managed venv (when `CREATE_VENV=1`), and the systemd unit runs the daemon with that venv python.
 
@@ -157,7 +186,7 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - installs managed ssh hardening and validates `sshd -t`
 - optionally enables `avahi-daemon` for `kai.local`
 - installs runtime package and helper commands
-- renders `/etc/kai/edge.env` including trigger mode, VAD settings, and observability settings
+- renders `/etc/kai/edge.env` including trigger mode, wakeword settings, VAD settings, and observability settings
 - installs `kai-edge-status` for quick service/runtime inspection
 - installs a managed logrotate policy for optional `/var/log/kai/*.log` files
 - optionally installs a managed journald retention drop-in with conservative size/time bounds
@@ -202,10 +231,21 @@ core/runtime keys:
 
 trigger keys:
 
-- `KAI_TRIGGER_MODE` (`manual` or `vad`)
+- `KAI_TRIGGER_MODE` (`manual`, `vad`, or `wakeword`)
 - `KAI_TRIGGER_SOCKET_PATH` (manual trigger socket path)
 
-vad tuning keys:
+wakeword keys:
+
+- `KAI_WAKEWORD_BACKEND` (currently `porcupine`)
+- `KAI_WAKEWORD_ACCESS_KEY`
+- `KAI_WAKEWORD_BUILTIN_KEYWORD` (default `porcupine`)
+- `KAI_WAKEWORD_KEYWORD_PATH` (optional absolute path to `.ppn`)
+- `KAI_WAKEWORD_MODEL_PATH` (optional absolute path to `.pv`)
+- `KAI_WAKEWORD_SENSITIVITY` (`0.0` to `1.0`)
+- `KAI_WAKEWORD_DETECTION_COOLDOWN_MS`
+- `KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS`
+
+vad tuning keys (used for `vad` mode and post-wake utterance capture in `wakeword` mode):
 
 - `KAI_VAD_AGGRESSIVENESS`
 - `KAI_VAD_FRAME_MS`
@@ -229,13 +269,18 @@ observability keys:
 1. set `KAI_TRIGGER_MODE` in `config.env`:
    - `manual` for explicit socket trigger
    - `vad` for armed listening
-2. rerun bootstrap:
+   - `wakeword` for passive wake detection + VAD post-wake capture
+2. if using `wakeword`, set at least:
+   - `KAI_WAKEWORD_ACCESS_KEY`
+   - `KAI_WAKEWORD_BUILTIN_KEYWORD` or `KAI_WAKEWORD_KEYWORD_PATH`
+   - `KAI_AUDIO_SAMPLE_RATE="16000"`
+3. rerun bootstrap:
 
 ```bash
 sudo ./bootstrap.sh
 ```
 
-3. restart service:
+4. restart service:
 
 ```bash
 sudo systemctl restart kai-edge.service
@@ -287,7 +332,7 @@ default policy is conservative for pi storage and is applied through `/etc/syste
 periodic summary lines look like:
 
 ```text
-summary trigger=periodic mode=vad backend=webrtcvad state=listening interactions=17 accepted=12 rejected=5 errors=0 avg_utterance_ms=2140 last_accepted_ms=2010 last_rejection=speech_too_short last_error=-
+summary trigger=periodic mode=wakeword vad_backend=webrtcvad wake_backend=porcupine state=listening interactions=17 accepted=12 rejected=5 errors=0 wake_detections=9 wake_post_accepted=7 wake_post_timeouts=2 wake_retrigger_suppressions=9 avg_utterance_ms=2140 last_accepted_ms=2010 last_rejection=speech_too_short last_error=-
 summary rejection_reasons={'speech_too_short': 4, 'speech_run_too_short': 1}
 summary stop_reasons={'trailing_silence': 16, 'max_duration': 1}
 ```
@@ -324,6 +369,23 @@ sudo journalctl -u kai-edge.service -f
 
 this phase relies on hardware mute for privacy/safety control during development.
 
+### wakeword daemon path (first daily-use phase)
+
+recommended workflow while validating wakeword mode:
+
+1. keep the physical mute switch enabled until you are ready to test.
+2. unmute, say the wake keyword, then speak one utterance.
+3. confirm logs show `wakeword detected`, then `post-wake utterance accepted` (or an explicit timeout/rejection reason).
+4. confirm reply audio plays, then daemon returns to `listening`.
+5. inspect counters and backend status:
+
+```bash
+/opt/kai/bin/kai-edge-status
+sudo journalctl -u kai-edge.service -f
+```
+
+first-phase limitations are expected; tune wake sensitivity and VAD thresholds conservatively for your room and mic.
+
 ### one-shot fallback path
 
 `kai-push-to-talk` remains available for direct one-off runs without the daemon:
@@ -358,17 +420,18 @@ sudo /opt/kai/bin/kai-doctor
 - real `kai-edge.service` unit shape (not placeholder)
 - journald routing for service stdout/stderr
 - service state expectations based on `ENABLE_KAI_EDGE_SERVICE`
-- mode-aware runtime checks for `manual` vs `vad`
+- mode-aware runtime checks for `manual`, `vad`, and `wakeword`
 - trigger socket expectations when service is active
-- VAD config shape checks when `KAI_TRIGGER_MODE=vad`
+- VAD config shape checks when `KAI_TRIGGER_MODE=vad` or `wakeword`
+- wakeword config and model/keyword path checks when `KAI_TRIGGER_MODE=wakeword`
 - observability env shape and status artifact path config
-- runtime status artifact readability and minimum field shape when service is active
+- runtime status artifact readability, mode match, and backend shape checks when service is active
 - managed journald retention config shape when enabled
 - managed logrotate policy presence and file-log coverage under `/var/log/kai`
 - python venv and alsa device visibility
-- webrtcvad availability in the managed venv when enabled
+- webrtcvad and pvporcupine availability in the managed venv when enabled
 
-in VAD mode, doctor explicitly does not claim end-to-end speech quality; it only validates safe/static runtime shape.
+in VAD or wakeword mode, doctor explicitly does not claim end-to-end acoustic quality; it only validates safe/static runtime shape.
 
 exit status:
 
@@ -379,13 +442,17 @@ exit status:
 
 this runtime intentionally does **not** include:
 
-- wake word
 - streaming stt/tts
 - conversation memory on the edge
 - multi-turn dialogue orchestration on the edge
+- interruption/barge-in during playback
 - external telemetry stacks (prometheus/opentelemetry/etc.)
 
-wake word is intentionally deferred so VAD behavior, daemon stability, and operator controls can be validated first.
+wakeword mode limitations in this phase:
+
+- no acoustic echo cancellation is applied, so room echo can still cause false detections
+- cooldown-based retrigger suppression is time-based, not speaker-ID aware
+- if post-wake speech never starts, the daemon times out and re-arms without interaction
 
 ## quick start
 

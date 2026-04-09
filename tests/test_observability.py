@@ -28,6 +28,7 @@ class ObservabilityTests(unittest.TestCase):
         obs = EdgeObservability(config=config, logger=logger, initial_state="idle")
 
         obs.set_vad_backend("webrtcvad")
+        obs.set_wake_backend("porcupine")
         obs.record_state_transition(old_state="idle", new_state="listening")
         obs.record_interaction_started()
         obs.record_accepted_utterance(utterance_ms=1200, stop_reason="trailing_silence")
@@ -35,16 +36,25 @@ class ObservabilityTests(unittest.TestCase):
             reason="speech_too_short",
             stop_reason="trailing_silence",
         )
+        obs.record_wake_detection()
+        obs.record_wake_post_accepted_utterance()
+        obs.record_wake_post_timeout()
+        obs.record_wake_retrigger_suppressed()
         obs.record_error(summary="network timeout while sending audio")
 
         snapshot = obs.snapshot()
 
         self.assertEqual(snapshot["state"], "listening")
         self.assertEqual(snapshot["vad_backend"], "webrtcvad")
+        self.assertEqual(snapshot["wake_backend"], "porcupine")
         self.assertEqual(snapshot["counters"]["interactions"], 1)
         self.assertEqual(snapshot["counters"]["accepted_utterances"], 1)
         self.assertEqual(snapshot["counters"]["rejected_utterances"], 1)
         self.assertEqual(snapshot["counters"]["errors"], 1)
+        self.assertEqual(snapshot["counters"]["wake_detections"], 1)
+        self.assertEqual(snapshot["counters"]["wake_post_accepted_utterances"], 1)
+        self.assertEqual(snapshot["counters"]["wake_post_speech_timeouts"], 1)
+        self.assertEqual(snapshot["counters"]["wake_retrigger_suppressions"], 1)
         self.assertEqual(snapshot["counters"]["avg_accepted_utterance_ms"], 1200)
         self.assertEqual(snapshot["counters"]["last_accepted_utterance_ms"], 1200)
         self.assertEqual(snapshot["counters"]["last_rejection_reason"], "speech_too_short")

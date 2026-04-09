@@ -94,6 +94,14 @@ load_config() {
   : "${KAI_HTTP_TIMEOUT_SECONDS:=60}"
   : "${KAI_TRIGGER_MODE:=manual}"
   : "${KAI_TRIGGER_SOCKET_PATH:=/run/kai-edge/trigger.sock}"
+  : "${KAI_WAKEWORD_BACKEND:=porcupine}"
+  : "${KAI_WAKEWORD_ACCESS_KEY:=}"
+  : "${KAI_WAKEWORD_BUILTIN_KEYWORD:=porcupine}"
+  : "${KAI_WAKEWORD_KEYWORD_PATH:=}"
+  : "${KAI_WAKEWORD_MODEL_PATH:=}"
+  : "${KAI_WAKEWORD_SENSITIVITY:=0.5}"
+  : "${KAI_WAKEWORD_DETECTION_COOLDOWN_MS:=1500}"
+  : "${KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS:=3000}"
   : "${KAI_VAD_AGGRESSIVENESS:=3}"
   : "${KAI_VAD_FRAME_MS:=30}"
   : "${KAI_VAD_PRE_ROLL_MS:=250}"
@@ -118,12 +126,47 @@ load_config() {
   : "${APT_PACKAGES_EXTRA:=}"
 
   case "$KAI_TRIGGER_MODE" in
-    manual|vad)
+    manual|vad|wakeword)
       ;;
     *)
-      die "KAI_TRIGGER_MODE must be one of: manual, vad (got: $KAI_TRIGGER_MODE)"
+      die "KAI_TRIGGER_MODE must be one of: manual, vad, wakeword (got: $KAI_TRIGGER_MODE)"
       ;;
   esac
+
+  case "$KAI_WAKEWORD_BACKEND" in
+    porcupine)
+      ;;
+    *)
+      die "KAI_WAKEWORD_BACKEND must be porcupine (got: $KAI_WAKEWORD_BACKEND)"
+      ;;
+  esac
+
+  [[ "$KAI_WAKEWORD_DETECTION_COOLDOWN_MS" =~ ^[0-9]+$ ]] || \
+    die "KAI_WAKEWORD_DETECTION_COOLDOWN_MS must be a non-negative integer"
+  [[ "$KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS" =~ ^[0-9]+$ ]] || \
+    die "KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS must be a non-negative integer"
+
+  [[ "$KAI_WAKEWORD_SENSITIVITY" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+    die "KAI_WAKEWORD_SENSITIVITY must be a float between 0 and 1"
+  awk -v value="$KAI_WAKEWORD_SENSITIVITY" 'BEGIN { exit !(value >= 0 && value <= 1) }' || \
+    die "KAI_WAKEWORD_SENSITIVITY must be between 0 and 1"
+
+  if [[ -n "$KAI_WAKEWORD_KEYWORD_PATH" ]] && [[ "$KAI_WAKEWORD_KEYWORD_PATH" != /* ]]; then
+    die "KAI_WAKEWORD_KEYWORD_PATH must be absolute when set"
+  fi
+  if [[ -n "$KAI_WAKEWORD_MODEL_PATH" ]] && [[ "$KAI_WAKEWORD_MODEL_PATH" != /* ]]; then
+    die "KAI_WAKEWORD_MODEL_PATH must be absolute when set"
+  fi
+
+  if [[ "$KAI_TRIGGER_MODE" == "wakeword" ]]; then
+    [[ -n "$KAI_WAKEWORD_ACCESS_KEY" ]] || \
+      die "KAI_WAKEWORD_ACCESS_KEY must be set when KAI_TRIGGER_MODE=wakeword"
+    if [[ -z "$KAI_WAKEWORD_BUILTIN_KEYWORD" ]] && [[ -z "$KAI_WAKEWORD_KEYWORD_PATH" ]]; then
+      die "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH for wakeword mode"
+    fi
+    [[ "$KAI_AUDIO_SAMPLE_RATE" == "16000" ]] || \
+      die "wakeword mode currently requires KAI_AUDIO_SAMPLE_RATE=16000"
+  fi
 
   [[ "$KAI_OBS_SUMMARY_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || \
     die "KAI_OBS_SUMMARY_INTERVAL_SECONDS must be a non-negative integer"
@@ -256,6 +299,14 @@ render_edge_env() {
     -e "s|__KAI_HTTP_TIMEOUT_SECONDS__|$(escape_sed_replacement "$KAI_HTTP_TIMEOUT_SECONDS")|g" \
     -e "s|__KAI_TRIGGER_MODE__|$(escape_sed_replacement "$KAI_TRIGGER_MODE")|g" \
     -e "s|__KAI_TRIGGER_SOCKET_PATH__|$(escape_sed_replacement "$KAI_TRIGGER_SOCKET_PATH")|g" \
+    -e "s|__KAI_WAKEWORD_BACKEND__|$(escape_sed_replacement "$KAI_WAKEWORD_BACKEND")|g" \
+    -e "s|__KAI_WAKEWORD_ACCESS_KEY__|$(escape_sed_replacement "$KAI_WAKEWORD_ACCESS_KEY")|g" \
+    -e "s|__KAI_WAKEWORD_BUILTIN_KEYWORD__|$(escape_sed_replacement "$KAI_WAKEWORD_BUILTIN_KEYWORD")|g" \
+    -e "s|__KAI_WAKEWORD_KEYWORD_PATH__|$(escape_sed_replacement "$KAI_WAKEWORD_KEYWORD_PATH")|g" \
+    -e "s|__KAI_WAKEWORD_MODEL_PATH__|$(escape_sed_replacement "$KAI_WAKEWORD_MODEL_PATH")|g" \
+    -e "s|__KAI_WAKEWORD_SENSITIVITY__|$(escape_sed_replacement "$KAI_WAKEWORD_SENSITIVITY")|g" \
+    -e "s|__KAI_WAKEWORD_DETECTION_COOLDOWN_MS__|$(escape_sed_replacement "$KAI_WAKEWORD_DETECTION_COOLDOWN_MS")|g" \
+    -e "s|__KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS__|$(escape_sed_replacement "$KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS")|g" \
     -e "s|__KAI_VAD_AGGRESSIVENESS__|$(escape_sed_replacement "$KAI_VAD_AGGRESSIVENESS")|g" \
     -e "s|__KAI_VAD_FRAME_MS__|$(escape_sed_replacement "$KAI_VAD_FRAME_MS")|g" \
     -e "s|__KAI_VAD_PRE_ROLL_MS__|$(escape_sed_replacement "$KAI_VAD_PRE_ROLL_MS")|g" \
@@ -749,25 +800,41 @@ ensure_runtime_python_dependencies() {
   fi
 
   if runuser -u "$KAI_USER" -- "$venv_python" -c 'import webrtcvad' >/dev/null 2>&1; then
-    note_status "webrtcvad is available for VAD mode"
+    note_status "webrtcvad is available for VAD and post-wake capture"
+  elif [[ "$KAI_TRIGGER_MODE" == "manual" ]]; then
+    note_status "webrtcvad is not installed; energy fallback will be used if VAD or wakeword mode is enabled"
+  else
+    warn "webrtcvad missing after dependency sync; trying source fallback package"
+    if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input webrtcvad >/dev/null 2>&1; then
+      note_change "installed webrtcvad source fallback into $VENV_DIR"
+      note_status "webrtcvad is available for VAD and post-wake capture"
+    else
+      warn "could not install webrtcvad source fallback into $VENV_DIR"
+      note_status "webrtcvad install failed; daemon will use energy fallback VAD"
+      note_manual "inspect VAD package install manually with: sudo -u $KAI_USER $venv_python -m pip install webrtcvad"
+    fi
+  fi
+
+  if runuser -u "$KAI_USER" -- "$venv_python" -c 'import pvporcupine' >/dev/null 2>&1; then
+    note_status "pvporcupine is available for wakeword mode"
     return 0
   fi
 
-  if [[ "$KAI_TRIGGER_MODE" != "vad" ]]; then
-    note_status "webrtcvad is not installed; energy fallback will be used if VAD mode is enabled"
+  if [[ "$KAI_TRIGGER_MODE" != "wakeword" ]]; then
+    note_status "pvporcupine is not installed; wakeword mode will be unavailable until dependencies are synced"
     return 0
   fi
 
-  warn "webrtcvad missing after dependency sync; trying source fallback package"
-  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input webrtcvad >/dev/null 2>&1; then
-    note_change "installed webrtcvad source fallback into $VENV_DIR"
-    note_status "webrtcvad is available for VAD mode"
+  warn "pvporcupine missing after dependency sync; trying direct install"
+  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input pvporcupine >/dev/null 2>&1; then
+    note_change "installed pvporcupine into $VENV_DIR"
+    note_status "pvporcupine is available for wakeword mode"
     return 0
   fi
 
-  warn "could not install webrtcvad source fallback into $VENV_DIR"
-  note_status "webrtcvad install failed; daemon will use energy fallback VAD"
-  note_manual "inspect VAD package install manually with: sudo -u $KAI_USER $venv_python -m pip install webrtcvad"
+  warn "could not install pvporcupine into $VENV_DIR"
+  note_status "pvporcupine install failed; wakeword mode will not start"
+  note_manual "inspect wakeword package install manually with: sudo -u $KAI_USER $venv_python -m pip install pvporcupine"
   return 0
 }
 
@@ -1109,6 +1176,10 @@ prepare_manual_follow_up() {
   note_status "kai-edge trigger mode configured: $KAI_TRIGGER_MODE"
   if [[ "$KAI_TRIGGER_MODE" == "vad" ]]; then
     note_manual "VAD mode is armed listening; use the physical mute switch during development testing"
+  elif [[ "$KAI_TRIGGER_MODE" == "wakeword" ]]; then
+    note_status "wakeword backend configured: $KAI_WAKEWORD_BACKEND"
+    note_manual "wakeword mode keeps passive listening armed; use the physical mute switch when not actively testing"
+    note_manual "validate wakeword flow end-to-end with: sudo journalctl -u kai-edge.service -f and $EDGE_STATUS_DEST"
   fi
 
   if [[ "$ENABLE_KAI_EDGE_SERVICE" == "1" ]]; then

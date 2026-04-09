@@ -33,7 +33,7 @@ class ArecordFrameSource:
         if self.record_device:
             command.extend(["-D", self.record_device])
 
-        self.logger.info("arming microphone stream for VAD")
+        self.logger.info("arming microphone stream")
         self._process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,

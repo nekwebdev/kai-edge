@@ -182,7 +182,9 @@ check_runtime_user() {
 }
 
 check_runtime_files() {
-  local backend_url trigger_mode trigger_socket
+  local backend_url trigger_mode trigger_socket sample_rate
+  local wakeword_backend wakeword_access_key wakeword_builtin_keyword wakeword_keyword_path wakeword_model_path
+  local wakeword_sensitivity wakeword_cooldown_ms wakeword_speech_timeout_ms
   local vad_aggressiveness vad_frame_ms vad_min_speech_ms vad_min_speech_run_ms vad_trailing_silence_ms
   local vad_max_utterance_ms vad_cooldown_ms vad_energy_threshold
   local obs_summary_seconds obs_summary_interactions obs_status_enabled_raw obs_status_enabled
@@ -248,7 +250,7 @@ check_runtime_files() {
   )"
 
   case "$trigger_mode" in
-    manual|vad)
+    manual|vad|wakeword)
       ok "trigger mode configured: $trigger_mode"
       ;;
     *)
@@ -270,11 +272,11 @@ check_runtime_files() {
     else
       fail "edge trigger socket path is blank in $EDGE_ENV_FILE"
     fi
-  elif [[ "$trigger_mode" == "vad" ]]; then
+  elif [[ "$trigger_mode" == "vad" || "$trigger_mode" == "wakeword" ]]; then
     if [[ -n "$trigger_socket" ]]; then
       ok "manual trigger socket still configured for fallback use: $trigger_socket"
     else
-      warn "KAI_TRIGGER_SOCKET_PATH is blank; manual trigger helper will not work while in VAD mode"
+      warn "KAI_TRIGGER_SOCKET_PATH is blank; manual trigger helper will not work while in $trigger_mode mode"
     fi
   fi
 
@@ -337,7 +339,143 @@ check_runtime_files() {
     fail "invalid KAI_OBS_STATUS_FILE_PATH in $EDGE_ENV_FILE: ${obs_status_path:-<blank>}"
   fi
 
-  if [[ "$trigger_mode" != "vad" ]]; then
+  if [[ "$trigger_mode" == "wakeword" ]]; then
+    wakeword_backend="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_BACKEND:-porcupine}"
+      ) 2>/dev/null || true
+    )"
+    case "$wakeword_backend" in
+      porcupine)
+        ok "wakeword backend configured: $wakeword_backend"
+        ;;
+      *)
+        fail "unsupported KAI_WAKEWORD_BACKEND in $EDGE_ENV_FILE: ${wakeword_backend:-<blank>}"
+        ;;
+    esac
+
+    wakeword_access_key="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_ACCESS_KEY:-}"
+      ) 2>/dev/null || true
+    )"
+    if [[ -n "$wakeword_access_key" ]]; then
+      ok "wakeword access key is configured"
+    else
+      fail "KAI_WAKEWORD_ACCESS_KEY is blank in $EDGE_ENV_FILE"
+    fi
+
+    wakeword_builtin_keyword="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_BUILTIN_KEYWORD:-porcupine}"
+      ) 2>/dev/null || true
+    )"
+    wakeword_keyword_path="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_KEYWORD_PATH:-}"
+      ) 2>/dev/null || true
+    )"
+    if [[ -n "$wakeword_builtin_keyword" ]] || [[ -n "$wakeword_keyword_path" ]]; then
+      ok "wakeword keyword source configured"
+    else
+      fail "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH in $EDGE_ENV_FILE"
+    fi
+
+    if [[ -n "$wakeword_keyword_path" ]]; then
+      if [[ "$wakeword_keyword_path" = /* ]]; then
+        ok "wakeword keyword path is absolute: $wakeword_keyword_path"
+      else
+        fail "KAI_WAKEWORD_KEYWORD_PATH must be absolute: $wakeword_keyword_path"
+      fi
+      if [[ -f "$wakeword_keyword_path" ]]; then
+        ok "wakeword keyword file exists: $wakeword_keyword_path"
+      else
+        fail "wakeword keyword file missing: $wakeword_keyword_path"
+      fi
+    fi
+
+    wakeword_model_path="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_MODEL_PATH:-}"
+      ) 2>/dev/null || true
+    )"
+    if [[ -n "$wakeword_model_path" ]]; then
+      if [[ "$wakeword_model_path" = /* ]]; then
+        ok "wakeword model path is absolute: $wakeword_model_path"
+      else
+        fail "KAI_WAKEWORD_MODEL_PATH must be absolute: $wakeword_model_path"
+      fi
+      if [[ -f "$wakeword_model_path" ]]; then
+        ok "wakeword model file exists: $wakeword_model_path"
+      else
+        fail "wakeword model file missing: $wakeword_model_path"
+      fi
+    fi
+
+    wakeword_sensitivity="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_SENSITIVITY:-0.5}"
+      ) 2>/dev/null || true
+    )"
+    if [[ "$wakeword_sensitivity" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v value="$wakeword_sensitivity" 'BEGIN { exit !(value >= 0 && value <= 1) }'; then
+      ok "wakeword sensitivity configured: $wakeword_sensitivity"
+    else
+      fail "invalid KAI_WAKEWORD_SENSITIVITY in $EDGE_ENV_FILE: ${wakeword_sensitivity:-<blank>}"
+    fi
+
+    wakeword_cooldown_ms="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_DETECTION_COOLDOWN_MS:-1500}"
+      ) 2>/dev/null || true
+    )"
+    if is_non_negative_int "$wakeword_cooldown_ms"; then
+      ok "wakeword detection cooldown configured: ${wakeword_cooldown_ms}ms"
+    else
+      fail "invalid KAI_WAKEWORD_DETECTION_COOLDOWN_MS in $EDGE_ENV_FILE: ${wakeword_cooldown_ms:-<blank>}"
+    fi
+
+    wakeword_speech_timeout_ms="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS:-3000}"
+      ) 2>/dev/null || true
+    )"
+    if is_non_negative_int "$wakeword_speech_timeout_ms"; then
+      ok "wakeword post-wake speech timeout configured: ${wakeword_speech_timeout_ms}ms"
+    else
+      fail "invalid KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS in $EDGE_ENV_FILE: ${wakeword_speech_timeout_ms:-<blank>}"
+    fi
+
+    sample_rate="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_AUDIO_SAMPLE_RATE:-16000}"
+      ) 2>/dev/null || true
+    )"
+    if [[ "$sample_rate" == "16000" ]]; then
+      ok "wakeword sample rate is compatible: $sample_rate"
+    else
+      fail "wakeword mode currently requires KAI_AUDIO_SAMPLE_RATE=16000 (got: ${sample_rate:-<blank>})"
+    fi
+  fi
+
+  if [[ "$trigger_mode" == "manual" ]]; then
     return 0
   fi
 
@@ -455,7 +593,11 @@ check_runtime_files() {
     fail "KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_RUN_MS"
   fi
 
-  warn "VAD runtime behavior is not fully validated by kai-doctor; run a live speech test with the physical mute switch"
+  if [[ "$trigger_mode" == "wakeword" ]]; then
+    warn "wakeword and VAD runtime behavior is not fully validated by kai-doctor; run live wake + speech tests with the physical mute switch"
+  else
+    warn "VAD runtime behavior is not fully validated by kai-doctor; run a live speech test with the physical mute switch"
+  fi
 }
 
 check_ssh_state() {
@@ -737,7 +879,7 @@ check_systemd_state() {
   )"
 
   case "$trigger_mode" in
-    manual|vad)
+    manual|vad|wakeword)
       ;;
     *)
       fail "cannot verify runtime mode because KAI_TRIGGER_MODE is invalid: ${trigger_mode:-<blank>}"
@@ -768,11 +910,11 @@ check_systemd_state() {
   fi
 
   if [[ -z "$trigger_socket" ]]; then
-    ok "trigger socket check skipped in VAD mode (KAI_TRIGGER_SOCKET_PATH is blank)"
+    ok "trigger socket check skipped in $trigger_mode mode (KAI_TRIGGER_SOCKET_PATH is blank)"
   elif [[ -S "$trigger_socket" ]]; then
-    ok "daemon trigger socket present in VAD mode: $trigger_socket"
+    ok "daemon trigger socket present in $trigger_mode mode: $trigger_socket"
   else
-    ok "trigger socket not present in VAD mode (expected when manual socket loop is disabled)"
+    ok "trigger socket not present in $trigger_mode mode (expected when manual socket loop is disabled)"
   fi
 }
 
@@ -852,7 +994,7 @@ check_logging_retention_state() {
 }
 
 check_runtime_status_artifact() {
-  local status_enabled_raw status_enabled status_path active_state
+  local status_enabled_raw status_enabled status_path active_state trigger_mode status_mode
 
   if [[ ! -f "$EDGE_ENV_FILE" ]]; then
     warn "cannot validate runtime status artifact because edge env file is missing: $EDGE_ENV_FILE"
@@ -911,10 +1053,41 @@ check_runtime_status_artifact() {
     return 0
   fi
 
-  if jq -e '.state and .mode and .counters and (.counters.interactions != null)' "$status_path" >/dev/null 2>&1; then
+  if jq -e '.state and .mode and .counters and (.counters.interactions != null) and (.counters.wake_detections != null)' "$status_path" >/dev/null 2>&1; then
     ok "runtime status artifact contains expected observability fields"
   else
     fail "runtime status artifact is readable but missing expected observability fields"
+    return 0
+  fi
+
+  trigger_mode="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_MODE:-manual}"
+    ) 2>/dev/null || true
+  )"
+  status_mode="$(jq -r '.mode // ""' "$status_path" 2>/dev/null || true)"
+  if [[ "$status_mode" == "$trigger_mode" ]]; then
+    ok "runtime status artifact mode matches configured trigger mode: $trigger_mode"
+  else
+    fail "runtime status artifact mode mismatch: expected ${trigger_mode:-<blank>}, got ${status_mode:-<blank>}"
+  fi
+
+  if [[ "$trigger_mode" == "wakeword" ]]; then
+    if jq -e '.wake_backend != null and .wake_backend != "" and .wake_backend != "n/a"' "$status_path" >/dev/null 2>&1; then
+      ok "runtime status artifact reports active wake backend"
+    else
+      fail "runtime status artifact does not report an active wake backend while in wakeword mode"
+    fi
+  fi
+
+  if [[ "$trigger_mode" == "vad" || "$trigger_mode" == "wakeword" ]]; then
+    if jq -e '.vad_backend != null and .vad_backend != "" and .vad_backend != "n/a"' "$status_path" >/dev/null 2>&1; then
+      ok "runtime status artifact reports active VAD backend"
+    else
+      fail "runtime status artifact does not report an active VAD backend in $trigger_mode mode"
+    fi
   fi
 }
 
@@ -938,6 +1111,8 @@ check_python_venv() {
 }
 
 check_webrtcvad_dependency() {
+  local trigger_mode
+
   if [[ "$CREATE_VENV" != "1" ]]; then
     warn "CREATE_VENV=0; runtime python dependency sync is disabled"
     return 0
@@ -948,13 +1123,56 @@ check_webrtcvad_dependency() {
     return 0
   fi
 
+  trigger_mode="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_MODE:-manual}"
+    ) 2>/dev/null || true
+  )"
+
   if "$KAI_VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
 import webrtcvad
 PY
   then
     ok "webrtcvad available in managed venv"
+  elif [[ "$trigger_mode" == "manual" ]]; then
+    warn "webrtcvad missing in managed venv; VAD and wakeword modes will fall back to energy detector"
   else
-    warn "webrtcvad missing in managed venv; daemon may fall back to energy VAD"
+    warn "webrtcvad missing in managed venv; runtime will fall back to energy VAD in $trigger_mode mode"
+  fi
+}
+
+check_pvporcupine_dependency() {
+  local trigger_mode
+
+  if [[ "$CREATE_VENV" != "1" ]]; then
+    warn "CREATE_VENV=0; runtime python dependency sync is disabled"
+    return 0
+  fi
+
+  if [[ ! -x "$KAI_VENV_DIR/bin/python" ]]; then
+    warn "venv python missing; skipping pvporcupine check"
+    return 0
+  fi
+
+  trigger_mode="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_MODE:-manual}"
+    ) 2>/dev/null || true
+  )"
+
+  if "$KAI_VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
+import pvporcupine
+PY
+  then
+    ok "pvporcupine available in managed venv"
+  elif [[ "$trigger_mode" == "wakeword" ]]; then
+    fail "pvporcupine missing in managed venv while wakeword mode is configured"
+  else
+    warn "pvporcupine missing in managed venv; wakeword mode will be unavailable"
   fi
 }
 
@@ -1028,6 +1246,7 @@ main() {
   check_runtime_status_artifact
   check_python_venv
   check_webrtcvad_dependency
+  check_pvporcupine_dependency
   check_audio_visibility
   print_summary
 

@@ -13,4 +13,6 @@ __all__ = [
     "trigger_client",
     "vad",
     "vad_session",
+    "wakeword",
+    "wakeword_runtime",
 ]

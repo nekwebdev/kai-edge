@@ -10,6 +10,7 @@ from kai_edge.config import (
     DEFAULT_OBS_STATUS_FILE_PATH,
     DEFAULT_TRIGGER_MODE,
     DEFAULT_TRIGGER_SOCKET_PATH,
+    DEFAULT_WAKEWORD_BACKEND,
     build_edge_config,
     load_env_file,
 )
@@ -71,6 +72,28 @@ class ConfigTests(unittest.TestCase):
     def test_build_edge_config_accepts_vad_trigger_mode(self) -> None:
         config = build_edge_config(file_settings={"KAI_TRIGGER_MODE": "vad"})
         self.assertEqual(config.trigger_mode, "vad")
+
+    def test_build_edge_config_accepts_wakeword_trigger_mode(self) -> None:
+        config = build_edge_config(
+            file_settings={
+                "KAI_TRIGGER_MODE": "wakeword",
+                "KAI_WAKEWORD_ACCESS_KEY": "test-access-key",
+            }
+        )
+        self.assertEqual(config.trigger_mode, "wakeword")
+        self.assertEqual(config.wakeword_backend, DEFAULT_WAKEWORD_BACKEND)
+
+    def test_build_edge_config_rejects_wakeword_mode_without_access_key(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_TRIGGER_MODE": "wakeword"})
+
+    def test_build_edge_config_rejects_invalid_wakeword_sensitivity(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_WAKEWORD_SENSITIVITY": "1.5"})
+
+    def test_build_edge_config_rejects_relative_wakeword_keyword_path(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_WAKEWORD_KEYWORD_PATH": "models/kai.ppn"})
 
     def test_build_edge_config_rejects_invalid_trigger_mode(self) -> None:
         with self.assertRaises(EdgeConfigError):

@@ -13,7 +13,7 @@ from ..logging_config import configure_logging
 def build_parser() -> argparse.ArgumentParser:
     env_file_default = os.environ.get("KAI_EDGE_ENV_FILE", DEFAULT_ENV_FILE)
     parser = argparse.ArgumentParser(
-        description="Run the kai edge daemon in manual trigger or VAD armed-listening mode.",
+        description="Run the kai edge daemon in manual, VAD, or wakeword trigger mode.",
     )
     parser.add_argument(
         "--env-file",

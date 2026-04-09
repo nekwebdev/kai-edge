@@ -80,6 +80,7 @@ class EdgeObservability:
         self._logger = logger
         self._mode = config.trigger_mode
         self._vad_backend = "n/a"
+        self._wake_backend = "n/a"
         self._state = initial_state
 
         now = _utc_now_iso()
@@ -98,6 +99,10 @@ class EdgeObservability:
         self._last_error_summary: str | None = None
         self._rejection_reasons: Counter[str] = Counter()
         self._stop_reasons: Counter[str] = Counter()
+        self._wake_detections = 0
+        self._wake_post_accepted_utterances = 0
+        self._wake_post_speech_timeouts = 0
+        self._wake_retrigger_suppressions = 0
 
         self._summary_interval_seconds = config.obs_summary_interval_seconds
         self._summary_interval_interactions = config.obs_summary_interval_interactions
@@ -129,6 +134,11 @@ class EdgeObservability:
 
     def set_vad_backend(self, backend_name: str) -> None:
         self._vad_backend = backend_name or "n/a"
+        self._touch()
+        self._publish_status()
+
+    def set_wake_backend(self, backend_name: str) -> None:
+        self._wake_backend = backend_name or "n/a"
         self._touch()
         self._publish_status()
 
@@ -177,6 +187,26 @@ class EdgeObservability:
         self._touch()
         self._publish_status()
 
+    def record_wake_detection(self) -> None:
+        self._wake_detections += 1
+        self._touch()
+        self._publish_status()
+
+    def record_wake_post_accepted_utterance(self) -> None:
+        self._wake_post_accepted_utterances += 1
+        self._touch()
+        self._publish_status()
+
+    def record_wake_post_timeout(self) -> None:
+        self._wake_post_speech_timeouts += 1
+        self._touch()
+        self._publish_status()
+
+    def record_wake_retrigger_suppressed(self) -> None:
+        self._wake_retrigger_suppressions += 1
+        self._touch()
+        self._publish_status()
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "started_at": self._started_at,
@@ -185,12 +215,17 @@ class EdgeObservability:
             "state": self._state,
             "state_since": self._state_since,
             "vad_backend": self._vad_backend,
+            "wake_backend": self._wake_backend,
             "last_transition": self._last_transition,
             "counters": {
                 "interactions": self._interactions,
                 "accepted_utterances": self._accepted_utterances,
                 "rejected_utterances": self._rejected_utterances,
                 "errors": self._error_count,
+                "wake_detections": self._wake_detections,
+                "wake_post_accepted_utterances": self._wake_post_accepted_utterances,
+                "wake_post_speech_timeouts": self._wake_post_speech_timeouts,
+                "wake_retrigger_suppressions": self._wake_retrigger_suppressions,
                 "avg_accepted_utterance_ms": self._average_accepted_utterance_ms(),
                 "last_accepted_utterance_ms": self._last_accepted_utterance_ms,
                 "last_rejection_reason": self._last_rejection_reason,
@@ -224,15 +259,20 @@ class EdgeObservability:
             else "-"
         )
         self._logger.info(
-            "summary trigger=%s mode=%s backend=%s state=%s interactions=%s accepted=%s rejected=%s errors=%s avg_utterance_ms=%s last_accepted_ms=%s last_rejection=%s last_error=%s",
+            "summary trigger=%s mode=%s vad_backend=%s wake_backend=%s state=%s interactions=%s accepted=%s rejected=%s errors=%s wake_detections=%s wake_post_accepted=%s wake_post_timeouts=%s wake_retrigger_suppressions=%s avg_utterance_ms=%s last_accepted_ms=%s last_rejection=%s last_error=%s",
             trigger,
             self._mode,
             self._vad_backend,
+            self._wake_backend,
             self._state,
             self._interactions,
             self._accepted_utterances,
             self._rejected_utterances,
             self._error_count,
+            self._wake_detections,
+            self._wake_post_accepted_utterances,
+            self._wake_post_speech_timeouts,
+            self._wake_retrigger_suppressions,
             self._average_accepted_utterance_ms(),
             last_accepted_ms,
             _clamp_summary_text(self._last_rejection_reason),

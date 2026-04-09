@@ -14,7 +14,13 @@ DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_TRIGGER_SOCKET_PATH = "/run/kai-edge/trigger.sock"
 DEFAULT_TRIGGER_MODE = "manual"
-VALID_TRIGGER_MODES = ("manual", "vad")
+VALID_TRIGGER_MODES = ("manual", "vad", "wakeword")
+DEFAULT_WAKEWORD_BACKEND = "porcupine"
+VALID_WAKEWORD_BACKENDS = ("porcupine",)
+DEFAULT_WAKEWORD_BUILTIN_KEYWORD = "porcupine"
+DEFAULT_WAKEWORD_SENSITIVITY = 0.5
+DEFAULT_WAKEWORD_DETECTION_COOLDOWN_MS = 1500
+DEFAULT_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS = 3000
 DEFAULT_VAD_AGGRESSIVENESS = 3
 DEFAULT_VAD_FRAME_MS = 30
 DEFAULT_VAD_PRE_ROLL_MS = 250
@@ -40,6 +46,14 @@ class EdgeConfig:
     playback_device: str | None
     trigger_socket_path: str
     trigger_mode: str
+    wakeword_backend: str
+    wakeword_access_key: str | None
+    wakeword_builtin_keyword: str | None
+    wakeword_keyword_path: str | None
+    wakeword_model_path: str | None
+    wakeword_sensitivity: float
+    wakeword_detection_cooldown_ms: int
+    wakeword_post_wake_speech_timeout_ms: int
     vad_aggressiveness: int
     vad_frame_ms: int
     vad_pre_roll_ms: int
@@ -89,6 +103,34 @@ def parse_trigger_mode(raw_value: str) -> str:
     if value not in VALID_TRIGGER_MODES:
         valid_modes = ", ".join(VALID_TRIGGER_MODES)
         raise EdgeConfigError(f"KAI_TRIGGER_MODE must be one of: {valid_modes}")
+    return value
+
+
+def parse_wakeword_backend(raw_value: str) -> str:
+    value = raw_value.strip().lower()
+    if value not in VALID_WAKEWORD_BACKENDS:
+        valid_backends = ", ".join(VALID_WAKEWORD_BACKENDS)
+        raise EdgeConfigError(f"KAI_WAKEWORD_BACKEND must be one of: {valid_backends}")
+    return value
+
+
+def bounded_float(
+    raw_value: str,
+    setting_name: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise EdgeConfigError(f"{setting_name} must be a float: {raw_value!r}") from exc
+
+    if value < minimum or value > maximum:
+        raise EdgeConfigError(
+            f"{setting_name} must be between {minimum} and {maximum}: {raw_value!r}"
+        )
+
     return value
 
 
@@ -173,6 +215,16 @@ def build_edge_config(
         "KAI_PLAYBACK_DEVICE": "",
         "KAI_TRIGGER_SOCKET_PATH": DEFAULT_TRIGGER_SOCKET_PATH,
         "KAI_TRIGGER_MODE": DEFAULT_TRIGGER_MODE,
+        "KAI_WAKEWORD_BACKEND": DEFAULT_WAKEWORD_BACKEND,
+        "KAI_WAKEWORD_ACCESS_KEY": "",
+        "KAI_WAKEWORD_BUILTIN_KEYWORD": DEFAULT_WAKEWORD_BUILTIN_KEYWORD,
+        "KAI_WAKEWORD_KEYWORD_PATH": "",
+        "KAI_WAKEWORD_MODEL_PATH": "",
+        "KAI_WAKEWORD_SENSITIVITY": str(DEFAULT_WAKEWORD_SENSITIVITY),
+        "KAI_WAKEWORD_DETECTION_COOLDOWN_MS": str(DEFAULT_WAKEWORD_DETECTION_COOLDOWN_MS),
+        "KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS": str(
+            DEFAULT_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS
+        ),
         "KAI_VAD_AGGRESSIVENESS": str(DEFAULT_VAD_AGGRESSIVENESS),
         "KAI_VAD_FRAME_MS": str(DEFAULT_VAD_FRAME_MS),
         "KAI_VAD_PRE_ROLL_MS": str(DEFAULT_VAD_PRE_ROLL_MS),
@@ -214,6 +266,40 @@ def build_edge_config(
         trigger_socket_path = DEFAULT_TRIGGER_SOCKET_PATH
     trigger_mode = parse_trigger_mode(
         _get_setting("KAI_TRIGGER_MODE", file_settings, defaults, overrides)
+    )
+    wakeword_backend = parse_wakeword_backend(
+        _get_setting("KAI_WAKEWORD_BACKEND", file_settings, defaults, overrides)
+    )
+    wakeword_access_key = optional_string(
+        _get_setting("KAI_WAKEWORD_ACCESS_KEY", file_settings, defaults, overrides)
+    )
+    wakeword_builtin_keyword = optional_string(
+        _get_setting("KAI_WAKEWORD_BUILTIN_KEYWORD", file_settings, defaults, overrides)
+    )
+    wakeword_keyword_path = optional_string(
+        _get_setting("KAI_WAKEWORD_KEYWORD_PATH", file_settings, defaults, overrides)
+    )
+    wakeword_model_path = optional_string(
+        _get_setting("KAI_WAKEWORD_MODEL_PATH", file_settings, defaults, overrides)
+    )
+    wakeword_sensitivity = bounded_float(
+        _get_setting("KAI_WAKEWORD_SENSITIVITY", file_settings, defaults, overrides),
+        "KAI_WAKEWORD_SENSITIVITY",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    wakeword_detection_cooldown_ms = non_negative_int(
+        _get_setting("KAI_WAKEWORD_DETECTION_COOLDOWN_MS", file_settings, defaults, overrides),
+        "KAI_WAKEWORD_DETECTION_COOLDOWN_MS",
+    )
+    wakeword_post_wake_speech_timeout_ms = non_negative_int(
+        _get_setting(
+            "KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS",
+            file_settings,
+            defaults,
+            overrides,
+        ),
+        "KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS",
     )
     vad_aggressiveness = non_negative_int(
         _get_setting("KAI_VAD_AGGRESSIVENESS", file_settings, defaults, overrides),
@@ -276,6 +362,19 @@ def build_edge_config(
         obs_status_file_path = DEFAULT_OBS_STATUS_FILE_PATH
     if not obs_status_file_path.startswith("/"):
         raise EdgeConfigError("KAI_OBS_STATUS_FILE_PATH must be an absolute path")
+    if wakeword_keyword_path is not None and not wakeword_keyword_path.startswith("/"):
+        raise EdgeConfigError("KAI_WAKEWORD_KEYWORD_PATH must be an absolute path")
+    if wakeword_model_path is not None and not wakeword_model_path.startswith("/"):
+        raise EdgeConfigError("KAI_WAKEWORD_MODEL_PATH must be an absolute path")
+    if trigger_mode == "wakeword":
+        if wakeword_backend == "porcupine" and not wakeword_access_key:
+            raise EdgeConfigError(
+                "KAI_WAKEWORD_ACCESS_KEY must be set when KAI_TRIGGER_MODE=wakeword"
+            )
+        if wakeword_keyword_path is None and wakeword_builtin_keyword is None:
+            raise EdgeConfigError(
+                "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH for wakeword mode"
+            )
     if vad_max_utterance_ms <= vad_min_speech_ms:
         raise EdgeConfigError("KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS")
     if vad_max_utterance_ms <= vad_min_speech_run_ms:
@@ -292,6 +391,14 @@ def build_edge_config(
         playback_device=playback_device,
         trigger_socket_path=trigger_socket_path,
         trigger_mode=trigger_mode,
+        wakeword_backend=wakeword_backend,
+        wakeword_access_key=wakeword_access_key,
+        wakeword_builtin_keyword=wakeword_builtin_keyword,
+        wakeword_keyword_path=wakeword_keyword_path,
+        wakeword_model_path=wakeword_model_path,
+        wakeword_sensitivity=wakeword_sensitivity,
+        wakeword_detection_cooldown_ms=wakeword_detection_cooldown_ms,
+        wakeword_post_wake_speech_timeout_ms=wakeword_post_wake_speech_timeout_ms,
         vad_aggressiveness=vad_aggressiveness,
         vad_frame_ms=vad_frame_ms,
         vad_pre_roll_ms=vad_pre_roll_ms,

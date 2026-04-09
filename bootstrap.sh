@@ -47,6 +47,7 @@ declare -a MANUAL_ITEMS=()
 declare -a STATUS_ITEMS=()
 SSH_SNIPPET_CHANGED=0
 SYSTEMD_UNIT_CHANGED=0
+JOURNALD_DROPIN_CHANGED=0
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -102,6 +103,15 @@ load_config() {
   : "${KAI_VAD_MAX_UTTERANCE_MS:=10000}"
   : "${KAI_VAD_COOLDOWN_MS:=400}"
   : "${KAI_VAD_ENERGY_THRESHOLD:=260}"
+  : "${KAI_OBS_SUMMARY_INTERVAL_SECONDS:=300}"
+  : "${KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS:=10}"
+  : "${KAI_OBS_STATUS_FILE_ENABLED:=1}"
+  : "${KAI_OBS_STATUS_FILE_PATH:=/run/kai-edge/status.json}"
+  : "${MANAGE_JOURNALD_RETENTION:=1}"
+  : "${JOURNALD_SYSTEM_MAX_USE:=200M}"
+  : "${JOURNALD_RUNTIME_MAX_USE:=64M}"
+  : "${JOURNALD_MAX_FILE_SEC:=7day}"
+  : "${MANAGE_KAI_LOGROTATE:=1}"
   : "${ENABLE_KAI_EDGE_SERVICE:=0}"
   : "${KAI_RECORD_DEVICE:=}"
   : "${KAI_PLAYBACK_DEVICE:=}"
@@ -114,6 +124,43 @@ load_config() {
       die "KAI_TRIGGER_MODE must be one of: manual, vad (got: $KAI_TRIGGER_MODE)"
       ;;
   esac
+
+  [[ "$KAI_OBS_SUMMARY_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || \
+    die "KAI_OBS_SUMMARY_INTERVAL_SECONDS must be a non-negative integer"
+  [[ "$KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS" =~ ^[0-9]+$ ]] || \
+    die "KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS must be a non-negative integer"
+  [[ "$KAI_OBS_STATUS_FILE_PATH" = /* ]] || \
+    die "KAI_OBS_STATUS_FILE_PATH must be an absolute path"
+
+  case "$KAI_OBS_STATUS_FILE_ENABLED" in
+    0|1)
+      ;;
+    *)
+      die "KAI_OBS_STATUS_FILE_ENABLED must be 0 or 1"
+      ;;
+  esac
+
+  case "$MANAGE_JOURNALD_RETENTION" in
+    0|1)
+      ;;
+    *)
+      die "MANAGE_JOURNALD_RETENTION must be 0 or 1"
+      ;;
+  esac
+
+  case "$MANAGE_KAI_LOGROTATE" in
+    0|1)
+      ;;
+    *)
+      die "MANAGE_KAI_LOGROTATE must be 0 or 1"
+      ;;
+  esac
+
+  if [[ "$MANAGE_JOURNALD_RETENTION" == "1" ]]; then
+    [[ -n "$JOURNALD_SYSTEM_MAX_USE" ]] || die "JOURNALD_SYSTEM_MAX_USE must not be blank"
+    [[ -n "$JOURNALD_RUNTIME_MAX_USE" ]] || die "JOURNALD_RUNTIME_MAX_USE must not be blank"
+    [[ -n "$JOURNALD_MAX_FILE_SEC" ]] || die "JOURNALD_MAX_FILE_SEC must not be blank"
+  fi
 
   if [[ -z "${KAI_USER:-}" ]]; then
     KAI_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
@@ -138,9 +185,12 @@ load_config() {
   PUSH_TO_TALK_DEST="$KAI_BIN_DIR/kai-push-to-talk"
   EDGE_DAEMON_DEST="$KAI_BIN_DIR/kai-edge-daemon"
   EDGE_TRIGGER_DEST="$KAI_BIN_DIR/kai-edge-trigger"
+  EDGE_STATUS_DEST="$KAI_BIN_DIR/kai-edge-status"
   EDGE_PACKAGE_DEST="$KAI_APP_DIR/kai_edge"
   DOCTOR_CONFIG_DEST="/etc/kai/bootstrap.env"
   EDGE_ENV_DEST="$KAI_CONFIG_DIR/edge.env"
+  JOURNALD_DROPIN_DEST="/etc/systemd/journald.conf.d/90-kai-edge-retention.conf"
+  LOGROTATE_CONFIG_DEST="/etc/logrotate.d/kai-edge"
 }
 
 ensure_dir() {
@@ -215,8 +265,34 @@ render_edge_env() {
     -e "s|__KAI_VAD_MAX_UTTERANCE_MS__|$(escape_sed_replacement "$KAI_VAD_MAX_UTTERANCE_MS")|g" \
     -e "s|__KAI_VAD_COOLDOWN_MS__|$(escape_sed_replacement "$KAI_VAD_COOLDOWN_MS")|g" \
     -e "s|__KAI_VAD_ENERGY_THRESHOLD__|$(escape_sed_replacement "$KAI_VAD_ENERGY_THRESHOLD")|g" \
+    -e "s|__KAI_OBS_SUMMARY_INTERVAL_SECONDS__|$(escape_sed_replacement "$KAI_OBS_SUMMARY_INTERVAL_SECONDS")|g" \
+    -e "s|__KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS__|$(escape_sed_replacement "$KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS")|g" \
+    -e "s|__KAI_OBS_STATUS_FILE_ENABLED__|$(escape_sed_replacement "$KAI_OBS_STATUS_FILE_ENABLED")|g" \
+    -e "s|__KAI_OBS_STATUS_FILE_PATH__|$(escape_sed_replacement "$KAI_OBS_STATUS_FILE_PATH")|g" \
     -e "s|__KAI_RECORD_DEVICE__|$(escape_sed_replacement "$KAI_RECORD_DEVICE")|g" \
     -e "s|__KAI_PLAYBACK_DEVICE__|$(escape_sed_replacement "$KAI_PLAYBACK_DEVICE")|g" \
+    "$template" > "$output"
+}
+
+render_journald_dropin() {
+  local template=$1
+  local output=$2
+
+  sed \
+    -e "s|__JOURNALD_SYSTEM_MAX_USE__|$(escape_sed_replacement "$JOURNALD_SYSTEM_MAX_USE")|g" \
+    -e "s|__JOURNALD_RUNTIME_MAX_USE__|$(escape_sed_replacement "$JOURNALD_RUNTIME_MAX_USE")|g" \
+    -e "s|__JOURNALD_MAX_FILE_SEC__|$(escape_sed_replacement "$JOURNALD_MAX_FILE_SEC")|g" \
+    "$template" > "$output"
+}
+
+render_logrotate_config() {
+  local template=$1
+  local output=$2
+
+  sed \
+    -e "s|__KAI_LOG_DIR__|$(escape_sed_replacement "$KAI_LOG_DIR")|g" \
+    -e "s|__KAI_USER__|$(escape_sed_replacement "$KAI_USER")|g" \
+    -e "s|__KAI_GROUP__|$(escape_sed_replacement "$KAI_GROUP")|g" \
     "$template" > "$output"
 }
 
@@ -235,6 +311,7 @@ ensure_packages() {
     ca-certificates
     rsync
     openssh-server
+    logrotate
   )
   local extra_packages=()
 
@@ -833,6 +910,78 @@ install_edge_trigger_helper() {
   fi
 }
 
+install_edge_status_helper() {
+  local src="$SCRIPT_DIR/scripts/kai-edge-status.sh"
+  [[ -f "$src" ]] || die "missing edge status helper: $src"
+  if install_managed_file "$src" "$EDGE_STATUS_DEST" 0755 "$KAI_USER" "$KAI_GROUP"; then
+    :
+  fi
+}
+
+install_journald_retention_config() {
+  local template="$SCRIPT_DIR/files/journald/kai-edge-retention.conf.tmpl"
+  local rendered="$TMP_DIR/kai-edge-retention.conf"
+
+  if [[ "$MANAGE_JOURNALD_RETENTION" != "1" ]]; then
+    if [[ -f "$JOURNALD_DROPIN_DEST" ]]; then
+      rm -f "$JOURNALD_DROPIN_DEST"
+      note_change "removed managed journald retention config at $JOURNALD_DROPIN_DEST"
+      JOURNALD_DROPIN_CHANGED=1
+    else
+      log "journald retention management disabled in config.env"
+    fi
+    return 0
+  fi
+
+  [[ -f "$template" ]] || die "missing journald retention template: $template"
+  render_journald_dropin "$template" "$rendered"
+  if install_managed_file "$rendered" "$JOURNALD_DROPIN_DEST" 0644 root root; then
+    JOURNALD_DROPIN_CHANGED=1
+    note_status "managed journald retention policy installed at $JOURNALD_DROPIN_DEST"
+  fi
+}
+
+reload_journald_if_needed() {
+  if [[ "$JOURNALD_DROPIN_CHANGED" != "1" ]]; then
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found; cannot reload systemd-journald automatically"
+    note_manual "reload journald manually with: sudo systemctl restart systemd-journald"
+    return 0
+  fi
+
+  log "restarting systemd-journald to apply retention changes"
+  if systemctl restart systemd-journald; then
+    note_change "restarted systemd-journald for updated retention settings"
+    return 0
+  fi
+
+  warn "could not restart systemd-journald automatically"
+  note_manual "restart journald manually with: sudo systemctl restart systemd-journald"
+  return 0
+}
+
+install_logrotate_config() {
+  local template="$SCRIPT_DIR/files/logrotate/kai-edge.tmpl"
+  local rendered="$TMP_DIR/kai-edge.logrotate"
+
+  if [[ "$MANAGE_KAI_LOGROTATE" != "1" ]]; then
+    if [[ -f "$LOGROTATE_CONFIG_DEST" ]]; then
+      rm -f "$LOGROTATE_CONFIG_DEST"
+      note_change "removed managed logrotate config at $LOGROTATE_CONFIG_DEST"
+    fi
+    return 0
+  fi
+
+  [[ -f "$template" ]] || die "missing logrotate template: $template"
+  render_logrotate_config "$template" "$rendered"
+  if install_managed_file "$rendered" "$LOGROTATE_CONFIG_DEST" 0644 root root; then
+    note_status "managed logrotate policy installed at $LOGROTATE_CONFIG_DEST"
+  fi
+}
+
 ensure_kai_edge_service_if_requested() {
   local enabled_state active_state
 
@@ -906,8 +1055,16 @@ render_doctor_config() {
     printf 'EDGE_ENV_FILE=%q\n' "$EDGE_ENV_DEST"
     printf 'EDGE_DAEMON_HELPER=%q\n' "$EDGE_DAEMON_DEST"
     printf 'EDGE_TRIGGER_HELPER=%q\n' "$EDGE_TRIGGER_DEST"
+    printf 'EDGE_STATUS_HELPER=%q\n' "$EDGE_STATUS_DEST"
     printf 'EDGE_RUNTIME_PACKAGE_DIR=%q\n' "$EDGE_PACKAGE_DEST"
     printf 'PUSH_TO_TALK_HELPER=%q\n' "$PUSH_TO_TALK_DEST"
+    printf 'MANAGE_JOURNALD_RETENTION=%q\n' "$MANAGE_JOURNALD_RETENTION"
+    printf 'JOURNALD_DROPIN=%q\n' "$JOURNALD_DROPIN_DEST"
+    printf 'JOURNALD_SYSTEM_MAX_USE=%q\n' "$JOURNALD_SYSTEM_MAX_USE"
+    printf 'JOURNALD_RUNTIME_MAX_USE=%q\n' "$JOURNALD_RUNTIME_MAX_USE"
+    printf 'JOURNALD_MAX_FILE_SEC=%q\n' "$JOURNALD_MAX_FILE_SEC"
+    printf 'MANAGE_KAI_LOGROTATE=%q\n' "$MANAGE_KAI_LOGROTATE"
+    printf 'KAI_LOGROTATE_CONFIG=%q\n' "$LOGROTATE_CONFIG_DEST"
   } > "$output"
 }
 
@@ -933,6 +1090,8 @@ prepare_manual_follow_up() {
   note_manual "run $AUDIO_HELPER_DEST after the target microphone and speaker hardware are attached"
   note_manual "run sudo -u $KAI_USER $PUSH_TO_TALK_DEST for a manual one-shot record -> /audio -> playback test"
   note_manual "run sudo -u $KAI_USER $EDGE_TRIGGER_DEST to trigger one daemon-managed push-to-talk interaction"
+  note_manual "run $EDGE_STATUS_DEST to inspect live daemon state and counters"
+  note_manual "inspect service logs with: sudo journalctl -u kai-edge.service -f"
 
   if [[ "$INSTALL_RASPAP" == "1" ]]; then
     note_manual "join the fallback AP SSID \"$RASPAP_AP_SSID\" to reach the setup network if upstream wifi is unavailable"
@@ -957,6 +1116,16 @@ prepare_manual_follow_up() {
   else
     note_status "kai-edge.service will be installed but left disabled (ENABLE_KAI_EDGE_SERVICE=0)"
     note_manual "enable and start kai-edge.service manually with: sudo systemctl enable --now kai-edge.service"
+  fi
+
+  if [[ "$MANAGE_JOURNALD_RETENTION" == "1" ]]; then
+    note_status "managed journald retention policy enabled"
+  else
+    note_status "managed journald retention policy disabled"
+  fi
+
+  if [[ "$MANAGE_KAI_LOGROTATE" == "1" ]]; then
+    note_status "managed logrotate policy enabled for $KAI_LOG_DIR/*.log"
   fi
 
   if [[ "$INSTALL_AVAHI" == "1" ]]; then
@@ -1004,7 +1173,10 @@ print_summary() {
   printf -- '- %s\n' "$EDGE_PACKAGE_DEST"
   printf -- '- %s\n' "$EDGE_DAEMON_DEST"
   printf -- '- %s\n' "$EDGE_TRIGGER_DEST"
+  printf -- '- %s\n' "$EDGE_STATUS_DEST"
   printf -- '- %s\n' "$PUSH_TO_TALK_DEST"
+  printf -- '- %s\n' "$LOGROTATE_CONFIG_DEST"
+  printf -- '- %s\n' "$JOURNALD_DROPIN_DEST"
 }
 
 main() {
@@ -1030,7 +1202,11 @@ main() {
   install_push_to_talk_helper
   install_edge_daemon_helper
   install_edge_trigger_helper
+  install_edge_status_helper
   install_edge_env
+  install_logrotate_config
+  install_journald_retention_config
+  reload_journald_if_needed
   install_systemd_unit
   reload_systemd_if_needed
   ensure_kai_edge_service_if_requested || true

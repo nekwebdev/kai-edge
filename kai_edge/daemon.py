@@ -13,6 +13,7 @@ from .audio_stream import ArecordFrameSource
 from .config import EdgeConfig
 from .errors import EdgeRuntimeError
 from .interaction import process_recorded_audio, record_request_audio
+from .observability import EdgeObservability
 from .state import EdgeState
 from .vad import VadDetector, build_vad_detector
 from .vad_session import UtteranceCollector, UtteranceDecision
@@ -24,6 +25,11 @@ class EdgeDaemon:
         self._logger = logger
         self._state = EdgeState.IDLE
         self._stop_requested = False
+        self._observability = EdgeObservability(
+            config=config,
+            logger=logger,
+            initial_state=self._state.value,
+        )
 
     @property
     def state(self) -> EdgeState:
@@ -35,6 +41,10 @@ class EdgeDaemon:
         if old_state == new_state:
             return
         self._logger.info("state %s -> %s", old_state.value, new_state.value)
+        self._observability.record_state_transition(
+            old_state=old_state.value,
+            new_state=new_state.value,
+        )
 
     def _on_signal(self, signum: int, _frame: object | None) -> None:
         signal_name = signal.Signals(signum).name
@@ -87,6 +97,7 @@ class EdgeDaemon:
         recorded_audio_path: Path,
         temp_dir: Path,
     ) -> tuple[bool, str]:
+        self._observability.record_interaction_started()
         try:
             self._transition(EdgeState.SENDING)
             process_recorded_audio(
@@ -101,9 +112,11 @@ class EdgeDaemon:
         except Exception as exc:
             self._transition(EdgeState.ERROR)
             self._logger.error("interaction failed: %s", exc)
+            self._observability.record_error(summary=f"interaction failed: {exc}")
             return False, str(exc)
         finally:
             self._transition(EdgeState.IDLE)
+            self._observability.emit_summary_if_due()
 
     def _run_one_manual_interaction(self) -> tuple[bool, str]:
         try:
@@ -115,6 +128,10 @@ class EdgeDaemon:
                     temp_dir=temp_dir,
                     logger=self._logger,
                 )
+                self._observability.record_accepted_utterance(
+                    utterance_ms=self._config.record_seconds * 1000,
+                    stop_reason="manual_fixed_duration",
+                )
                 return self._run_interaction_for_recorded_path(
                     recorded_audio_path=recorded_audio_path,
                     temp_dir=temp_dir,
@@ -122,7 +139,9 @@ class EdgeDaemon:
         except Exception as exc:
             self._transition(EdgeState.ERROR)
             self._logger.error("interaction failed: %s", exc)
+            self._observability.record_error(summary=f"interaction failed: {exc}")
             self._transition(EdgeState.IDLE)
+            self._observability.emit_summary_if_due()
             return False, str(exc)
 
     def _handle_connection(self, connection: socket.socket) -> str:
@@ -156,6 +175,7 @@ class EdgeDaemon:
                 try:
                     connection, _ = server.accept()
                 except socket.timeout:
+                    self._observability.emit_summary_if_due()
                     continue
 
                 with connection:
@@ -165,6 +185,10 @@ class EdgeDaemon:
                         connection.sendall(f"{response}\n".encode("utf-8"))
                     except OSError as exc:
                         self._logger.warning("failed to send trigger response: %s", exc)
+                        self._observability.record_error(
+                            summary=f"trigger response send failed: {exc}"
+                        )
+                self._observability.emit_summary_if_due(trigger="interaction")
         finally:
             server.close()
             self._cleanup_socket_path()
@@ -208,6 +232,7 @@ class EdgeDaemon:
             logger=self._logger,
         ) as frame_source:
             while not self._stop_requested:
+                self._observability.emit_summary_if_due()
                 frame = frame_source.read_frame()
                 is_speech = detector.is_speech(frame=frame, sample_rate=self._config.sample_rate)
                 speech_start, decision = collector.consume_frame(frame=frame, is_speech=is_speech)
@@ -228,6 +253,7 @@ class EdgeDaemon:
 
     def _serve_vad_mode(self) -> int:
         detector = build_vad_detector(config=self._config, logger=self._logger)
+        self._observability.set_vad_backend(detector.backend_name)
         frame_bytes = self._frame_bytes_for_vad()
         self._logger.info(
             "VAD armed: backend=%s frame_ms=%s min_speech_ms=%s min_speech_run_ms=%s trailing_silence_ms=%s max_utterance_ms=%s",
@@ -251,8 +277,10 @@ class EdgeDaemon:
             except Exception as exc:
                 self._transition(EdgeState.ERROR)
                 self._logger.error("VAD capture failed: %s", exc)
+                self._observability.record_error(summary=f"VAD capture failed: {exc}")
                 self._transition(EdgeState.IDLE)
                 self._apply_vad_cooldown()
+                self._observability.emit_summary_if_due()
                 continue
 
             if decision is None:
@@ -267,8 +295,13 @@ class EdgeDaemon:
                     decision.longest_speech_run_ms,
                     decision.utterance_ms,
                 )
+                self._observability.record_rejected_utterance(
+                    reason=decision.reason,
+                    stop_reason=decision.stop_reason,
+                )
                 self._transition(EdgeState.IDLE)
                 self._apply_vad_cooldown()
+                self._observability.emit_summary_if_due(trigger="interaction")
                 continue
 
             self._logger.info(
@@ -277,6 +310,10 @@ class EdgeDaemon:
                 decision.speech_ms,
                 decision.longest_speech_run_ms,
                 decision.utterance_ms,
+            )
+            self._observability.record_accepted_utterance(
+                utterance_ms=decision.utterance_ms,
+                stop_reason=decision.stop_reason,
             )
             try:
                 with tempfile.TemporaryDirectory(prefix="kai-edge-daemon-vad-") as temp_dir_name:
@@ -294,9 +331,11 @@ class EdgeDaemon:
             except Exception as exc:
                 self._transition(EdgeState.ERROR)
                 self._logger.error("VAD interaction failed: %s", exc)
+                self._observability.record_error(summary=f"VAD interaction failed: {exc}")
                 self._transition(EdgeState.IDLE)
 
             self._apply_vad_cooldown()
+            self._observability.emit_summary_if_due(trigger="interaction")
 
         self._transition(EdgeState.IDLE)
         return 0
@@ -306,7 +345,10 @@ class EdgeDaemon:
         signal.signal(signal.SIGTERM, self._on_signal)
 
         mode = self._config.trigger_mode
+        if mode == "manual":
+            self._observability.set_vad_backend("n/a")
         self._logger.info("trigger mode selected: %s", mode)
+        self._observability.emit_summary_if_due(force=True, trigger="startup")
 
         if mode == "manual":
             result = self._serve_manual_mode()
@@ -315,5 +357,6 @@ class EdgeDaemon:
         else:
             raise EdgeRuntimeError(f"unsupported trigger mode: {mode}")
 
+        self._observability.emit_summary_if_due(force=True, trigger="shutdown")
         self._logger.info("daemon stopped")
         return result

@@ -27,8 +27,16 @@ EDGE_ENV_FILE="/etc/kai/edge.env"
 EDGE_RUNTIME_PACKAGE_DIR="/opt/kai/app/kai_edge"
 EDGE_DAEMON_HELPER="/opt/kai/bin/kai-edge-daemon"
 EDGE_TRIGGER_HELPER="/opt/kai/bin/kai-edge-trigger"
+EDGE_STATUS_HELPER="/opt/kai/bin/kai-edge-status"
 PUSH_TO_TALK_HELPER="/opt/kai/bin/kai-push-to-talk"
 ENABLE_KAI_EDGE_SERVICE="0"
+MANAGE_JOURNALD_RETENTION="1"
+JOURNALD_DROPIN="/etc/systemd/journald.conf.d/90-kai-edge-retention.conf"
+JOURNALD_SYSTEM_MAX_USE="200M"
+JOURNALD_RUNTIME_MAX_USE="64M"
+JOURNALD_MAX_FILE_SEC="7day"
+MANAGE_KAI_LOGROTATE="1"
+KAI_LOGROTATE_CONFIG="/etc/logrotate.d/kai-edge"
 
 ok_count=0
 warn_count=0
@@ -117,6 +125,21 @@ is_positive_int() {
   is_non_negative_int "$1" && [[ "$1" -gt 0 ]]
 }
 
+normalize_bool() {
+  local raw="${1,,}"
+  case "$raw" in
+    1|true|yes|on)
+      printf '1\n'
+      ;;
+    0|false|no|off)
+      printf '0\n'
+      ;;
+    *)
+      printf 'invalid\n'
+      ;;
+  esac
+}
+
 check_required_directories() {
   check_directory "$KAI_ROOT"
   check_directory "$KAI_APP_DIR"
@@ -134,6 +157,8 @@ check_required_commands() {
   check_command systemctl
   check_command arecord
   check_command aplay
+  check_command logrotate
+  check_command journalctl
 }
 
 check_runtime_user() {
@@ -160,6 +185,8 @@ check_runtime_files() {
   local backend_url trigger_mode trigger_socket
   local vad_aggressiveness vad_frame_ms vad_min_speech_ms vad_min_speech_run_ms vad_trailing_silence_ms
   local vad_max_utterance_ms vad_cooldown_ms vad_energy_threshold
+  local obs_summary_seconds obs_summary_interactions obs_status_enabled_raw obs_status_enabled
+  local obs_status_path
 
   if [[ -x "$PUSH_TO_TALK_HELPER" ]]; then
     ok "push-to-talk helper present: $PUSH_TO_TALK_HELPER"
@@ -177,6 +204,12 @@ check_runtime_files() {
     ok "edge trigger helper present: $EDGE_TRIGGER_HELPER"
   else
     fail "edge trigger helper missing: $EDGE_TRIGGER_HELPER"
+  fi
+
+  if [[ -x "$EDGE_STATUS_HELPER" ]]; then
+    ok "edge status helper present: $EDGE_STATUS_HELPER"
+  else
+    fail "edge status helper missing: $EDGE_STATUS_HELPER"
   fi
 
   if [[ -d "$EDGE_RUNTIME_PACKAGE_DIR" ]]; then
@@ -243,6 +276,65 @@ check_runtime_files() {
     else
       warn "KAI_TRIGGER_SOCKET_PATH is blank; manual trigger helper will not work while in VAD mode"
     fi
+  fi
+
+  obs_summary_seconds="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_OBS_SUMMARY_INTERVAL_SECONDS:-300}"
+    ) 2>/dev/null || true
+  )"
+  if is_non_negative_int "$obs_summary_seconds"; then
+    ok "observability summary seconds configured: $obs_summary_seconds"
+  else
+    fail "invalid KAI_OBS_SUMMARY_INTERVAL_SECONDS in $EDGE_ENV_FILE: ${obs_summary_seconds:-<blank>}"
+  fi
+
+  obs_summary_interactions="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS:-10}"
+    ) 2>/dev/null || true
+  )"
+  if is_non_negative_int "$obs_summary_interactions"; then
+    ok "observability summary interactions configured: $obs_summary_interactions"
+  else
+    fail "invalid KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS in $EDGE_ENV_FILE: ${obs_summary_interactions:-<blank>}"
+  fi
+
+  obs_status_enabled_raw="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_OBS_STATUS_FILE_ENABLED:-1}"
+    ) 2>/dev/null || true
+  )"
+  obs_status_enabled="$(normalize_bool "$obs_status_enabled_raw")"
+  case "$obs_status_enabled" in
+    1)
+      ok "runtime status artifact enabled"
+      ;;
+    0)
+      ok "runtime status artifact disabled"
+      ;;
+    *)
+      fail "invalid KAI_OBS_STATUS_FILE_ENABLED in $EDGE_ENV_FILE: ${obs_status_enabled_raw:-<blank>}"
+      ;;
+  esac
+
+  obs_status_path="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_OBS_STATUS_FILE_PATH:-/run/kai-edge/status.json}"
+    ) 2>/dev/null || true
+  )"
+  if [[ "$obs_status_path" = /* ]]; then
+    ok "runtime status artifact path configured: $obs_status_path"
+  else
+    fail "invalid KAI_OBS_STATUS_FILE_PATH in $EDGE_ENV_FILE: ${obs_status_path:-<blank>}"
   fi
 
   if [[ "$trigger_mode" != "vad" ]]; then
@@ -586,6 +678,18 @@ check_systemd_state() {
     fail "kai-edge.service does not reference kai-edge-daemon (placeholder unit or stale config)"
   fi
 
+  if grep -Fq "StandardOutput=journal" "$SYSTEMD_UNIT"; then
+    ok "kai-edge.service stdout is routed to journald"
+  else
+    fail "kai-edge.service stdout is not explicitly routed to journald"
+  fi
+
+  if grep -Fq "StandardError=journal" "$SYSTEMD_UNIT"; then
+    ok "kai-edge.service stderr is routed to journald"
+  else
+    fail "kai-edge.service stderr is not explicitly routed to journald"
+  fi
+
   if ! have_command systemctl; then
     ok "kai-edge.service unit present: $SYSTEMD_UNIT"
     warn "skipping kai-edge.service state check because systemctl is unavailable"
@@ -669,6 +773,148 @@ check_systemd_state() {
     ok "daemon trigger socket present in VAD mode: $trigger_socket"
   else
     ok "trigger socket not present in VAD mode (expected when manual socket loop is disabled)"
+  fi
+}
+
+check_logging_retention_state() {
+  local manage_journald manage_logrotate sample_log
+
+  manage_journald="$(normalize_bool "$MANAGE_JOURNALD_RETENTION")"
+  case "$manage_journald" in
+    1)
+      if [[ -f "$JOURNALD_DROPIN" ]]; then
+        ok "managed journald retention config present: $JOURNALD_DROPIN"
+      else
+        fail "managed journald retention config missing: $JOURNALD_DROPIN"
+      fi
+
+      if [[ -f "$JOURNALD_DROPIN" ]] && grep -Fqx "SystemMaxUse=${JOURNALD_SYSTEM_MAX_USE}" "$JOURNALD_DROPIN"; then
+        ok "journald SystemMaxUse matches bootstrap config"
+      else
+        fail "journald SystemMaxUse does not match expected value: $JOURNALD_SYSTEM_MAX_USE"
+      fi
+
+      if [[ -f "$JOURNALD_DROPIN" ]] && grep -Fqx "RuntimeMaxUse=${JOURNALD_RUNTIME_MAX_USE}" "$JOURNALD_DROPIN"; then
+        ok "journald RuntimeMaxUse matches bootstrap config"
+      else
+        fail "journald RuntimeMaxUse does not match expected value: $JOURNALD_RUNTIME_MAX_USE"
+      fi
+
+      if [[ -f "$JOURNALD_DROPIN" ]] && grep -Fqx "MaxFileSec=${JOURNALD_MAX_FILE_SEC}" "$JOURNALD_DROPIN"; then
+        ok "journald MaxFileSec matches bootstrap config"
+      else
+        fail "journald MaxFileSec does not match expected value: $JOURNALD_MAX_FILE_SEC"
+      fi
+      ;;
+    0)
+      if [[ -f "$JOURNALD_DROPIN" ]]; then
+        warn "managed journald retention is disabled, but drop-in is still present: $JOURNALD_DROPIN"
+      else
+        ok "managed journald retention is disabled"
+      fi
+      ;;
+    *)
+      fail "invalid MANAGE_JOURNALD_RETENTION value in bootstrap state: $MANAGE_JOURNALD_RETENTION"
+      ;;
+  esac
+
+  manage_logrotate="$(normalize_bool "$MANAGE_KAI_LOGROTATE")"
+  case "$manage_logrotate" in
+    1)
+      if [[ -f "$KAI_LOGROTATE_CONFIG" ]]; then
+        ok "managed logrotate config present: $KAI_LOGROTATE_CONFIG"
+      else
+        fail "managed logrotate config missing: $KAI_LOGROTATE_CONFIG"
+      fi
+      ;;
+    0)
+      if [[ -f "$KAI_LOGROTATE_CONFIG" ]]; then
+        warn "managed logrotate is disabled, but config is still present: $KAI_LOGROTATE_CONFIG"
+      else
+        ok "managed logrotate config is disabled"
+      fi
+      ;;
+    *)
+      fail "invalid MANAGE_KAI_LOGROTATE value in bootstrap state: $MANAGE_KAI_LOGROTATE"
+      ;;
+  esac
+
+  sample_log="$(find "$KAI_LOG_DIR" -maxdepth 1 -type f -name '*.log' -print -quit 2>/dev/null || true)"
+  if [[ -n "$sample_log" ]]; then
+    if [[ -f "$KAI_LOGROTATE_CONFIG" ]]; then
+      ok "file logs detected under $KAI_LOG_DIR and logrotate policy is present"
+    else
+      fail "file logs detected under $KAI_LOG_DIR without a managed logrotate policy"
+    fi
+  else
+    ok "no explicit file logs detected under $KAI_LOG_DIR"
+  fi
+}
+
+check_runtime_status_artifact() {
+  local status_enabled_raw status_enabled status_path active_state
+
+  if [[ ! -f "$EDGE_ENV_FILE" ]]; then
+    warn "cannot validate runtime status artifact because edge env file is missing: $EDGE_ENV_FILE"
+    return 0
+  fi
+
+  status_enabled_raw="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_OBS_STATUS_FILE_ENABLED:-1}"
+    ) 2>/dev/null || true
+  )"
+  status_enabled="$(normalize_bool "$status_enabled_raw")"
+  if [[ "$status_enabled" == "invalid" ]]; then
+    fail "invalid KAI_OBS_STATUS_FILE_ENABLED in $EDGE_ENV_FILE: ${status_enabled_raw:-<blank>}"
+    return 0
+  fi
+
+  status_path="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_OBS_STATUS_FILE_PATH:-/run/kai-edge/status.json}"
+    ) 2>/dev/null || true
+  )"
+  if [[ "$status_path" != /* ]]; then
+    fail "invalid KAI_OBS_STATUS_FILE_PATH in $EDGE_ENV_FILE: ${status_path:-<blank>}"
+    return 0
+  fi
+
+  if [[ "$status_enabled" != "1" ]]; then
+    ok "runtime status artifact disabled by config"
+    return 0
+  fi
+
+  if ! have_command systemctl; then
+    warn "cannot validate runtime status artifact availability without systemctl"
+    return 0
+  fi
+
+  active_state="$(systemctl is-active kai-edge.service 2>/dev/null || true)"
+  if [[ "$active_state" != "active" ]]; then
+    warn "kai-edge.service is not active; runtime status artifact presence is not guaranteed"
+    return 0
+  fi
+
+  if [[ ! -r "$status_path" ]]; then
+    fail "runtime status artifact is enabled but not readable: $status_path"
+    return 0
+  fi
+  ok "runtime status artifact readable: $status_path"
+
+  if ! have_command jq; then
+    warn "jq unavailable; cannot validate runtime status artifact structure"
+    return 0
+  fi
+
+  if jq -e '.state and .mode and .counters and (.counters.interactions != null)' "$status_path" >/dev/null 2>&1; then
+    ok "runtime status artifact contains expected observability fields"
+  else
+    fail "runtime status artifact is readable but missing expected observability fields"
   fi
 }
 
@@ -778,6 +1024,8 @@ main() {
   check_avahi_state
   check_raspap_state
   check_systemd_state
+  check_logging_retention_state
+  check_runtime_status_artifact
   check_python_venv
   check_webrtcvad_dependency
   check_audio_visibility

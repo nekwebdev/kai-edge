@@ -24,6 +24,10 @@ DEFAULT_VAD_TRAILING_SILENCE_MS = 700
 DEFAULT_VAD_MAX_UTTERANCE_MS = 10000
 DEFAULT_VAD_COOLDOWN_MS = 400
 DEFAULT_VAD_ENERGY_THRESHOLD = 260
+DEFAULT_OBS_SUMMARY_INTERVAL_SECONDS = 300
+DEFAULT_OBS_SUMMARY_INTERVAL_INTERACTIONS = 10
+DEFAULT_OBS_STATUS_FILE_ENABLED = True
+DEFAULT_OBS_STATUS_FILE_PATH = "/run/kai-edge/status.json"
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,10 @@ class EdgeConfig:
     vad_max_utterance_ms: int
     vad_cooldown_ms: int
     vad_energy_threshold: int
+    obs_summary_interval_seconds: int
+    obs_summary_interval_interactions: int
+    obs_status_file_enabled: bool
+    obs_status_file_path: str
 
 
 def positive_int(raw_value: str, setting_name: str) -> int:
@@ -82,6 +90,17 @@ def parse_trigger_mode(raw_value: str) -> str:
         valid_modes = ", ".join(VALID_TRIGGER_MODES)
         raise EdgeConfigError(f"KAI_TRIGGER_MODE must be one of: {valid_modes}")
     return value
+
+
+def parse_bool(raw_value: str, setting_name: str) -> bool:
+    value = raw_value.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise EdgeConfigError(
+        f"{setting_name} must be one of: 1, 0, true, false, yes, no, on, off"
+    )
 
 
 def load_env_file(path: str) -> dict[str, str]:
@@ -163,6 +182,10 @@ def build_edge_config(
         "KAI_VAD_MAX_UTTERANCE_MS": str(DEFAULT_VAD_MAX_UTTERANCE_MS),
         "KAI_VAD_COOLDOWN_MS": str(DEFAULT_VAD_COOLDOWN_MS),
         "KAI_VAD_ENERGY_THRESHOLD": str(DEFAULT_VAD_ENERGY_THRESHOLD),
+        "KAI_OBS_SUMMARY_INTERVAL_SECONDS": str(DEFAULT_OBS_SUMMARY_INTERVAL_SECONDS),
+        "KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS": str(DEFAULT_OBS_SUMMARY_INTERVAL_INTERACTIONS),
+        "KAI_OBS_STATUS_FILE_ENABLED": "1" if DEFAULT_OBS_STATUS_FILE_ENABLED else "0",
+        "KAI_OBS_STATUS_FILE_PATH": DEFAULT_OBS_STATUS_FILE_PATH,
     }
 
     backend_url = _get_setting("KAI_CORE_BASE_URL", file_settings, defaults, overrides).strip()
@@ -234,6 +257,25 @@ def build_edge_config(
         _get_setting("KAI_VAD_ENERGY_THRESHOLD", file_settings, defaults, overrides),
         "KAI_VAD_ENERGY_THRESHOLD",
     )
+    obs_summary_interval_seconds = non_negative_int(
+        _get_setting("KAI_OBS_SUMMARY_INTERVAL_SECONDS", file_settings, defaults, overrides),
+        "KAI_OBS_SUMMARY_INTERVAL_SECONDS",
+    )
+    obs_summary_interval_interactions = non_negative_int(
+        _get_setting("KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS", file_settings, defaults, overrides),
+        "KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS",
+    )
+    obs_status_file_enabled = parse_bool(
+        _get_setting("KAI_OBS_STATUS_FILE_ENABLED", file_settings, defaults, overrides),
+        "KAI_OBS_STATUS_FILE_ENABLED",
+    )
+    obs_status_file_path = _get_setting(
+        "KAI_OBS_STATUS_FILE_PATH", file_settings, defaults, overrides
+    ).strip()
+    if not obs_status_file_path:
+        obs_status_file_path = DEFAULT_OBS_STATUS_FILE_PATH
+    if not obs_status_file_path.startswith("/"):
+        raise EdgeConfigError("KAI_OBS_STATUS_FILE_PATH must be an absolute path")
     if vad_max_utterance_ms <= vad_min_speech_ms:
         raise EdgeConfigError("KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS")
     if vad_max_utterance_ms <= vad_min_speech_run_ms:
@@ -259,6 +301,10 @@ def build_edge_config(
         vad_max_utterance_ms=vad_max_utterance_ms,
         vad_cooldown_ms=vad_cooldown_ms,
         vad_energy_threshold=vad_energy_threshold,
+        obs_summary_interval_seconds=obs_summary_interval_seconds,
+        obs_summary_interval_interactions=obs_summary_interval_interactions,
+        obs_status_file_enabled=obs_status_file_enabled,
+        obs_status_file_path=obs_status_file_path,
     )
 
 

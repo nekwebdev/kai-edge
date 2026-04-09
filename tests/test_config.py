@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from kai_edge.config import (
+    DEFAULT_OBS_STATUS_FILE_PATH,
     DEFAULT_TRIGGER_MODE,
     DEFAULT_TRIGGER_SOCKET_PATH,
     build_edge_config,
@@ -74,6 +75,21 @@ class ConfigTests(unittest.TestCase):
     def test_build_edge_config_rejects_invalid_trigger_mode(self) -> None:
         with self.assertRaises(EdgeConfigError):
             build_edge_config(file_settings={"KAI_TRIGGER_MODE": "voice"})
+
+    def test_build_edge_config_defaults_observability_settings(self) -> None:
+        config = build_edge_config(file_settings={})
+        self.assertEqual(config.obs_summary_interval_seconds, 300)
+        self.assertEqual(config.obs_summary_interval_interactions, 10)
+        self.assertTrue(config.obs_status_file_enabled)
+        self.assertEqual(config.obs_status_file_path, DEFAULT_OBS_STATUS_FILE_PATH)
+
+    def test_build_edge_config_rejects_invalid_observability_bool(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_OBS_STATUS_FILE_ENABLED": "maybe"})
+
+    def test_build_edge_config_rejects_relative_status_path(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_OBS_STATUS_FILE_PATH": "status.json"})
 
     def test_build_edge_config_rejects_invalid_vad_frame_size(self) -> None:
         with self.assertRaises(EdgeConfigError):

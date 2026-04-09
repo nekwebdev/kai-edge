@@ -8,6 +8,7 @@ __all__ = [
     "daemon",
     "interaction",
     "logging_config",
+    "observability",
     "state",
     "trigger_client",
     "vad",

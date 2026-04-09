@@ -1,0 +1,12 @@
+# managed by kai-edge bootstrap
+__KAI_LOG_DIR__/*.log {
+  daily
+  rotate 7
+  missingok
+  notifempty
+  compress
+  delaycompress
+  copytruncate
+  su __KAI_USER__ __KAI_GROUP__
+  create 0640 __KAI_USER__ __KAI_GROUP__
+}

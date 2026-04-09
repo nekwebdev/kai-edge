@@ -11,7 +11,12 @@ from kai_edge.errors import EdgeRuntimeError
 
 class EdgeDaemonTests(unittest.TestCase):
     def _make_daemon(self, *, trigger_mode: str = "manual") -> EdgeDaemon:
-        config = build_edge_config(file_settings={"KAI_TRIGGER_MODE": trigger_mode})
+        config = build_edge_config(
+            file_settings={
+                "KAI_TRIGGER_MODE": trigger_mode,
+                "KAI_OBS_STATUS_FILE_ENABLED": "0",
+            }
+        )
         logger = logging.getLogger("test-daemon")
         return EdgeDaemon(config=config, logger=logger)
 
@@ -47,6 +52,7 @@ class EdgeDaemonTests(unittest.TestCase):
                 file_settings={
                     "KAI_AUDIO_SAMPLE_RATE": "11025",
                     "KAI_VAD_FRAME_MS": "30",
+                    "KAI_OBS_STATUS_FILE_ENABLED": "0",
                 }
             ),
             logger=logging.getLogger("test-daemon"),

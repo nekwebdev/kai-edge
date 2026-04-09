@@ -25,6 +25,10 @@ it does not manage:
 ├── files
 │   ├── env
 │   │   └── edge.env.tmpl
+│   ├── journald
+│   │   └── kai-edge-retention.conf.tmpl
+│   ├── logrotate
+│   │   └── kai-edge.tmpl
 │   ├── ssh
 │   │   └── 60-kai-hardening.conf
 │   └── systemd
@@ -40,6 +44,7 @@ it does not manage:
 │   ├── core_client.py
 │   ├── daemon.py
 │   ├── interaction.py
+│   ├── observability.py
 │   ├── state.py
 │   ├── vad.py
 │   ├── vad_session.py
@@ -48,12 +53,14 @@ it does not manage:
 │   ├── kai-audio-check.sh
 │   ├── kai-doctor.sh
 │   ├── kai-edge-daemon.py
+│   ├── kai-edge-status.sh
 │   ├── kai-edge-trigger.py
 │   └── kai-push-to-talk.py
 ├── tests
 │   ├── test_config.py
 │   ├── test_core_client.py
 │   ├── test_daemon.py
+│   ├── test_observability.py
 │   └── test_vad_session.py
 └── README.md
 ```
@@ -101,6 +108,9 @@ vad mode arms the microphone and loops:
 7. return to `idle`, apply cooldown, and re-arm.
 
 logs include mode selection, arm state, speech start/end, accept/reject reason, sending/speaking/idle transitions, and errors.
+the daemon also emits a periodic observability summary with counters (interactions, accepted/rejected, stop/rejection reasons, error count, and utterance duration stats).
+
+when enabled, the daemon writes a runtime status artifact to `/run/kai-edge/status.json` so operators and `kai-doctor` can inspect current state and counters without scraping logs.
 
 ## vad implementation choice
 
@@ -116,14 +126,18 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - `/opt/kai`: app root, helper scripts, and optional venv
 - `/opt/kai/app/kai_edge`: installed runtime python package
 - `/opt/kai/bin/kai-edge-daemon`: daemon entrypoint
+- `/opt/kai/bin/kai-edge-status`: runtime status helper
 - `/opt/kai/bin/kai-edge-trigger`: daemon trigger helper
 - `/opt/kai/bin/kai-push-to-talk`: one-shot fallback helper
 - `/opt/kai/bin/kai-doctor`: readiness helper
 - `/etc/kai/edge.env`: runtime config for daemon and one-shot helper
 - `/etc/kai/bootstrap.env`: bootstrap state used by `kai-doctor`
 - `/etc/systemd/system/kai-edge.service`: managed runtime service unit
+- `/etc/systemd/journald.conf.d/90-kai-edge-retention.conf`: managed journald retention policy (optional, bootstrap-managed)
+- `/etc/logrotate.d/kai-edge`: managed rotation policy for optional `/var/log/kai/*.log` files
+- `/run/kai-edge/status.json`: daemon runtime status artifact (when enabled)
 - `/var/lib/kai`: service state
-- `/var/log/kai`: optional log location for edge components
+- `/var/log/kai`: optional file-log location for edge components
 - `/etc/ssh/sshd_config.d/60-kai-hardening.conf`: conservative ssh hardening
 
 ## bootstrap behavior
@@ -143,7 +157,10 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - installs managed ssh hardening and validates `sshd -t`
 - optionally enables `avahi-daemon` for `kai.local`
 - installs runtime package and helper commands
-- renders `/etc/kai/edge.env` including trigger mode and VAD settings
+- renders `/etc/kai/edge.env` including trigger mode, VAD settings, and observability settings
+- installs `kai-edge-status` for quick service/runtime inspection
+- installs a managed logrotate policy for optional `/var/log/kai/*.log` files
+- optionally installs a managed journald retention drop-in with conservative size/time bounds
 - installs real `kai-edge.service` and reloads systemd
 - optionally enables/starts `kai-edge.service` when `ENABLE_KAI_EDGE_SERVICE="1"`
 - writes `/etc/kai/bootstrap.env` for `kai-doctor`
@@ -200,6 +217,13 @@ vad tuning keys:
 - `KAI_VAD_COOLDOWN_MS`
 - `KAI_VAD_ENERGY_THRESHOLD` (fallback detector threshold)
 
+observability keys:
+
+- `KAI_OBS_SUMMARY_INTERVAL_SECONDS` (periodic summary cadence; `0` disables time-based summaries)
+- `KAI_OBS_SUMMARY_INTERVAL_INTERACTIONS` (summary cadence by interaction count; `0` disables count-based summaries)
+- `KAI_OBS_STATUS_FILE_ENABLED` (`1` or `0`)
+- `KAI_OBS_STATUS_FILE_PATH` (default `/run/kai-edge/status.json`)
+
 ## switching modes
 
 1. set `KAI_TRIGGER_MODE` in `config.env`:
@@ -237,6 +261,35 @@ journal logs:
 
 ```bash
 sudo journalctl -u kai-edge.service -f
+```
+
+status helper:
+
+```bash
+/opt/kai/bin/kai-edge-status
+```
+
+## logging retention
+
+daemon/service logs are intentionally journald-first (`StandardOutput=journal`, `StandardError=journal`).
+
+bootstrap can manage host-level journald retention with:
+
+- `MANAGE_JOURNALD_RETENTION`
+- `JOURNALD_SYSTEM_MAX_USE`
+- `JOURNALD_RUNTIME_MAX_USE`
+- `JOURNALD_MAX_FILE_SEC`
+
+default policy is conservative for pi storage and is applied through `/etc/systemd/journald.conf.d/90-kai-edge-retention.conf`.
+
+`/var/log/kai` is optional. if explicit file logs are used there, `/etc/logrotate.d/kai-edge` keeps `*.log` files bounded.
+
+periodic summary lines look like:
+
+```text
+summary trigger=periodic mode=vad backend=webrtcvad state=listening interactions=17 accepted=12 rejected=5 errors=0 avg_utterance_ms=2140 last_accepted_ms=2010 last_rejection=speech_too_short last_error=-
+summary rejection_reasons={'speech_too_short': 4, 'speech_run_too_short': 1}
+summary stop_reasons={'trailing_silence': 16, 'max_duration': 1}
 ```
 
 ## usage
@@ -297,16 +350,21 @@ sudo /opt/kai/bin/kai-doctor
 `kai-doctor` validates:
 
 - expected directories, commands, runtime user, and audio group membership
-- installed runtime files (`kai_edge` package, daemon/trigger/one-shot helpers, env file)
+- installed runtime files (`kai_edge` package, daemon/trigger/status/one-shot helpers, env file)
 - ssh config validity
 - tailscale state and tailscale ssh state
 - avahi state when enabled
 - raspap state when enabled
 - real `kai-edge.service` unit shape (not placeholder)
+- journald routing for service stdout/stderr
 - service state expectations based on `ENABLE_KAI_EDGE_SERVICE`
 - mode-aware runtime checks for `manual` vs `vad`
 - trigger socket expectations when service is active
 - VAD config shape checks when `KAI_TRIGGER_MODE=vad`
+- observability env shape and status artifact path config
+- runtime status artifact readability and minimum field shape when service is active
+- managed journald retention config shape when enabled
+- managed logrotate policy presence and file-log coverage under `/var/log/kai`
 - python venv and alsa device visibility
 - webrtcvad availability in the managed venv when enabled
 
@@ -325,6 +383,7 @@ this runtime intentionally does **not** include:
 - streaming stt/tts
 - conversation memory on the edge
 - multi-turn dialogue orchestration on the edge
+- external telemetry stacks (prometheus/opentelemetry/etc.)
 
 wake word is intentionally deferred so VAD behavior, daemon stability, and operator controls can be validated first.
 

@@ -10,6 +10,9 @@
 - `kai` rollout branch policy:
   - use local branch `kai-local` on `kai` (tracking `origin/main`)
   - keep operator-specific `config.env` changes committed on `kai-local`
-  - update flow on `kai`: `git fetch origin` then `git rebase origin/main` (or `git pull --rebase`)
+  - update flow on `kai`: fast-forward local `main` from `origin/main`, then rebase `kai-local` onto local `main`
+  - bootstrap first-run exception: if `main` is dirty only in `config.env` and `kai-local` does not exist yet, bootstrap migrates that `config.env` delta into a new `kai-local` commit and cleans `main`
+  - bootstrap reruns require clean working trees on both `main` and `kai-local`; otherwise bootstrap must fail loudly with cleanup instructions
+  - after git-flow enforcement, bootstrap should leave the checkout on `kai-local`
   - bootstrap should enforce this flow when `KAI_GIT_ENSURE_KAI_LOCAL_FLOW=1` (default)
   - do not commit operator-only `config.env` changes back to `origin/main` unless explicitly requested

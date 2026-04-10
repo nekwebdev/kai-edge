@@ -219,7 +219,8 @@ git rollout flow keys in `config.env`:
 - `KAI_GIT_MAIN_BRANCH` (default `main`)
 - `KAI_GIT_LOCAL_BRANCH` (default `kai-local`)
 - when enabled, bootstrap only allows one dirty scenario: first run on `main` with `config.env` edits and no existing `kai-local`; bootstrap migrates those edits into a new `kai-local` commit, resets `main`, then returns to `kai-local`
-- on reruns, bootstrap requires clean `main` and `kai-local` working trees and exits with an error if either is dirty
+- on reruns, bootstrap allows one dirty case: `kai-local` has local `config.env` edits; branch sync is skipped for that run so config changes can be iterated without committing yet
+- bootstrap still exits with an error for dirty non-`config.env` paths
 - update flow is `main` fast-forward from `origin/main`, then `kai-local` rebase onto local `main`
 
 ## service enable default

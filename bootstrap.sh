@@ -1089,6 +1089,10 @@ ensure_kai_local_git_flow() {
       cp "$config_path" "$config_backup_path"
       first_run_config_migration=1
       note_status "detected first-run config.env override on $KAI_GIT_MAIN_BRANCH; migrating to $KAI_GIT_LOCAL_BRANCH"
+    elif [[ ${#non_config_changes[@]} -eq 0 && "$config_dirty" == "1" && "$local_branch_exists" == "1" && "$current_branch" == "$KAI_GIT_LOCAL_BRANCH" ]]; then
+      note_status "detected local config.env edits on $KAI_GIT_LOCAL_BRANCH; skipping git branch sync for this bootstrap run"
+      note_manual "commit local config.env changes on $KAI_GIT_LOCAL_BRANCH when you are ready to persist operator settings"
+      return 0
     else
       die "git working tree is dirty on $current_branch (${dirty_paths[*]:-unknown}); commit or stash changes and rerun bootstrap"
     fi

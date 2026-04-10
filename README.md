@@ -191,6 +191,8 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - creates base directories
 - optionally creates a python venv
 - syncs runtime python dependencies into the managed venv (when `CREATE_VENV=1`)
+- configures repo-local git identity in the bootstrap checkout from `GIT_USER_NAME` and `GIT_USER_EMAIL`
+- enforces kai rollout git flow (configurable): keeps local `main` fast-forwarded to `origin/main`, ensures a `kai-local` branch exists, commits local `config.env` overrides on `kai-local`, rebases `kai-local` on `origin/main`, and leaves the checkout on `kai-local`
 - prefetches and pins an openwakeword `hey_jarvis` model when openwakeword is available and no custom openwakeword model path is configured
 - ensures runtime user is in the `audio` group
 - installs managed ssh hardening and validates `sshd -t`
@@ -207,6 +209,16 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - applies a safety guard that removes invalid fallback AP self-gateway routes on `wlan0`
 
 safe re-runs are handled with managed file comparisons and non-destructive directory setup.
+
+git rollout flow keys in `config.env`:
+
+- `GIT_USER_NAME`
+- `GIT_USER_EMAIL`
+- `KAI_GIT_ENSURE_KAI_LOCAL_FLOW` (`1` default, set `0` to disable bootstrap branch automation)
+- `KAI_GIT_REMOTE` (default `origin`)
+- `KAI_GIT_MAIN_BRANCH` (default `main`)
+- `KAI_GIT_LOCAL_BRANCH` (default `kai-local`)
+- when enabled, bootstrap requires a clean working tree except first-run migration of `config.env` from dirty `main` into a new `kai-local` commit
 
 ## service enable default
 

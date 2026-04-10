@@ -88,6 +88,12 @@ load_config() {
   : "${RASPAP_ENABLE_FALLBACK_AP:=1}"
   : "${RASPAP_ADMIN_USER:=admin}"
   : "${RASPAP_ADMIN_PASSWORD:=kai-admin-change-this}"
+  : "${GIT_USER_NAME:=}"
+  : "${GIT_USER_EMAIL:=}"
+  : "${KAI_GIT_ENSURE_KAI_LOCAL_FLOW:=1}"
+  : "${KAI_GIT_REMOTE:=origin}"
+  : "${KAI_GIT_MAIN_BRANCH:=main}"
+  : "${KAI_GIT_LOCAL_BRANCH:=kai-local}"
   : "${KAI_CORE_BASE_URL:=}"
   : "${KAI_RECORD_SECONDS:=5}"
   : "${KAI_AUDIO_SAMPLE_RATE:=16000}"
@@ -142,6 +148,21 @@ load_config() {
       die "KAI_WAKEWORD_BACKEND must be one of: porcupine, openwakeword (got: $KAI_WAKEWORD_BACKEND)"
       ;;
   esac
+
+  case "$KAI_GIT_ENSURE_KAI_LOCAL_FLOW" in
+    0|1)
+      ;;
+    *)
+      die "KAI_GIT_ENSURE_KAI_LOCAL_FLOW must be 0 or 1"
+      ;;
+  esac
+
+  [[ -n "$KAI_GIT_REMOTE" ]] || die "KAI_GIT_REMOTE must not be blank"
+  [[ -n "$KAI_GIT_MAIN_BRANCH" ]] || die "KAI_GIT_MAIN_BRANCH must not be blank"
+  [[ -n "$KAI_GIT_LOCAL_BRANCH" ]] || die "KAI_GIT_LOCAL_BRANCH must not be blank"
+  if [[ "$KAI_GIT_MAIN_BRANCH" == "$KAI_GIT_LOCAL_BRANCH" ]]; then
+    die "KAI_GIT_MAIN_BRANCH and KAI_GIT_LOCAL_BRANCH must be different branch names"
+  fi
 
   [[ "$KAI_WAKEWORD_DETECTION_COOLDOWN_MS" =~ ^[0-9]+$ ]] || \
     die "KAI_WAKEWORD_DETECTION_COOLDOWN_MS must be a non-negative integer"
@@ -900,6 +921,264 @@ ensure_runtime_python_dependencies() {
   return 0
 }
 
+ensure_repo_git_identity() {
+  local repo_dir="$SCRIPT_DIR"
+  local current_name current_email
+
+  if [[ ! -d "$repo_dir/.git" ]]; then
+    note_status "repo git identity setup skipped (no .git directory at $repo_dir)"
+    return 0
+  fi
+
+  if [[ -z "$GIT_USER_NAME" ]] || [[ -z "$GIT_USER_EMAIL" ]]; then
+    warn "GIT_USER_NAME or GIT_USER_EMAIL is blank; skipping repo git identity setup"
+    note_manual "set GIT_USER_NAME and GIT_USER_EMAIL in $CONFIG_FILE to configure repo git identity on this node"
+    return 0
+  fi
+
+  current_name="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" config --get user.name 2>/dev/null || true)"
+  current_email="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" config --get user.email 2>/dev/null || true)"
+
+  if [[ "$current_name" == "$GIT_USER_NAME" ]] && [[ "$current_email" == "$GIT_USER_EMAIL" ]]; then
+    log "repo git identity already configured for $repo_dir"
+    note_status "repo git identity configured for $KAI_USER: $GIT_USER_NAME <$GIT_USER_EMAIL>"
+    return 0
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" config user.name "$GIT_USER_NAME"; then
+    warn "could not set repo git user.name in $repo_dir"
+    note_manual "set git user.name manually with: cd $repo_dir && git config user.name \"$GIT_USER_NAME\""
+    return 0
+  fi
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" config user.email "$GIT_USER_EMAIL"; then
+    warn "could not set repo git user.email in $repo_dir"
+    note_manual "set git user.email manually with: cd $repo_dir && git config user.email \"$GIT_USER_EMAIL\""
+    return 0
+  fi
+  note_change "configured repo git identity for $repo_dir as $GIT_USER_NAME <$GIT_USER_EMAIL>"
+  note_status "repo git identity configured for $KAI_USER: $GIT_USER_NAME <$GIT_USER_EMAIL>"
+}
+
+ensure_kai_local_git_flow() {
+  local repo_dir="$SCRIPT_DIR"
+  local config_rel_path="config.env"
+  local config_path="$repo_dir/$config_rel_path"
+  local config_backup_path="$TMP_DIR/config.env.kai-local.backup"
+  local main_remote_ref="refs/remotes/$KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH"
+  local main_local_ref="refs/heads/$KAI_GIT_MAIN_BRANCH"
+  local local_branch_ref="refs/heads/$KAI_GIT_LOCAL_BRANCH"
+  local path current_pull_rebase current_rebase_autostash current_branch status_output
+  local main_before="" main_after="" local_before="" local_after="" remote_head=""
+  local local_branch_exists=0
+  local first_run_config_migration=0
+  local config_dirty=0
+  local -a non_config_changes=() dirty_paths=()
+  local -A changed_paths=()
+
+  if [[ "$KAI_GIT_ENSURE_KAI_LOCAL_FLOW" != "1" ]]; then
+    note_status "kai-local git flow automation disabled (KAI_GIT_ENSURE_KAI_LOCAL_FLOW=0)"
+    return 0
+  fi
+
+  if [[ ! -d "$repo_dir/.git" ]]; then
+    note_status "kai-local git flow setup skipped (no .git directory at $repo_dir)"
+    return 0
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "could not validate git repository at $repo_dir for kai-local branch setup"
+  fi
+
+  current_pull_rebase="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" config --get pull.rebase 2>/dev/null || true)"
+  if [[ "$current_pull_rebase" != "true" ]]; then
+    if runuser -u "$KAI_USER" -- git -C "$repo_dir" config pull.rebase true; then
+      note_change "configured repo git pull.rebase=true for $repo_dir"
+    else
+      die "could not set pull.rebase=true in $repo_dir"
+    fi
+  fi
+
+  current_rebase_autostash="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" config --get rebase.autoStash 2>/dev/null || true)"
+  if [[ "$current_rebase_autostash" != "true" ]]; then
+    if runuser -u "$KAI_USER" -- git -C "$repo_dir" config rebase.autoStash true; then
+      note_change "configured repo git rebase.autoStash=true for $repo_dir"
+    else
+      die "could not set rebase.autoStash=true in $repo_dir"
+    fi
+  fi
+
+  current_branch="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [[ -n "$current_branch" ]] || die "git checkout is detached in $repo_dir; checkout $KAI_GIT_MAIN_BRANCH or $KAI_GIT_LOCAL_BRANCH before running bootstrap"
+
+  if runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse --verify --quiet "$local_branch_ref" >/dev/null 2>&1; then
+    local_branch_exists=1
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" remote get-url "$KAI_GIT_REMOTE" >/dev/null 2>&1; then
+    die "git remote \"$KAI_GIT_REMOTE\" is not configured in $repo_dir"
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" fetch "$KAI_GIT_REMOTE" "$KAI_GIT_MAIN_BRANCH" >/dev/null 2>&1; then
+    die "could not fetch $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH for kai-local branch sync"
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse --verify --quiet "$main_remote_ref" >/dev/null 2>&1; then
+    die "remote ref $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH is not available in $repo_dir"
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse --verify --quiet "$main_local_ref" >/dev/null 2>&1; then
+    if runuser -u "$KAI_USER" -- git -C "$repo_dir" branch "$KAI_GIT_MAIN_BRANCH" "$KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH" >/dev/null 2>&1; then
+      note_change "created local $KAI_GIT_MAIN_BRANCH branch from $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH"
+    else
+      die "could not create local $KAI_GIT_MAIN_BRANCH branch in $repo_dir"
+    fi
+  fi
+
+  status_output="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  if [[ -n "$status_output" ]]; then
+    while IFS= read -r path; do
+      [[ -n "$path" ]] && changed_paths["$path"]=1
+    done < <(runuser -u "$KAI_USER" -- git -C "$repo_dir" diff --name-only 2>/dev/null || true)
+    while IFS= read -r path; do
+      [[ -n "$path" ]] && changed_paths["$path"]=1
+    done < <(runuser -u "$KAI_USER" -- git -C "$repo_dir" diff --cached --name-only 2>/dev/null || true)
+    while IFS= read -r path; do
+      [[ -n "$path" ]] && changed_paths["$path"]=1
+    done < <(runuser -u "$KAI_USER" -- git -C "$repo_dir" ls-files --others --exclude-standard 2>/dev/null || true)
+
+    for path in "${!changed_paths[@]}"; do
+      if [[ "$path" == "$config_rel_path" ]]; then
+        config_dirty=1
+        continue
+      fi
+      non_config_changes+=("$path")
+      dirty_paths+=("$path")
+    done
+
+    if [[ ${#non_config_changes[@]} -eq 0 && "$config_dirty" == "1" && "$local_branch_exists" == "0" && "$current_branch" == "$KAI_GIT_MAIN_BRANCH" ]]; then
+      if [[ ! -f "$config_path" ]]; then
+        die "cannot preserve local config overrides because $config_path is missing"
+      fi
+      cp "$config_path" "$config_backup_path"
+      first_run_config_migration=1
+      note_status "detected first-run config.env override on $KAI_GIT_MAIN_BRANCH; migrating to $KAI_GIT_LOCAL_BRANCH"
+    else
+      die "git working tree is dirty on $current_branch (${dirty_paths[*]:-unknown}); commit or stash changes and rerun bootstrap"
+    fi
+  fi
+
+  if [[ "$first_run_config_migration" == "1" ]]; then
+    if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" checkout -b "$KAI_GIT_LOCAL_BRANCH" >/dev/null 2>&1; then
+      die "could not create and checkout $KAI_GIT_LOCAL_BRANCH from dirty $KAI_GIT_MAIN_BRANCH"
+    fi
+    if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" add "$config_rel_path" >/dev/null 2>&1; then
+      die "could not stage $config_rel_path on $KAI_GIT_LOCAL_BRANCH"
+    fi
+    if runuser -u "$KAI_USER" -- git -C "$repo_dir" diff --cached --quiet -- "$config_rel_path"; then
+      die "no staged $config_rel_path change found for first-run kai-local migration"
+    fi
+    if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" commit -m "chore(kai): sync local config.env overrides" >/dev/null 2>&1; then
+      die "could not commit first-run $config_rel_path override on $KAI_GIT_LOCAL_BRANCH"
+    fi
+    note_change "committed local $config_rel_path overrides on $KAI_GIT_LOCAL_BRANCH"
+    local_branch_exists=1
+
+    if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" checkout "$KAI_GIT_MAIN_BRANCH" >/dev/null 2>&1; then
+      die "could not checkout $KAI_GIT_MAIN_BRANCH after first-run kai-local migration"
+    fi
+
+    if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" checkout HEAD -- "$config_rel_path" >/dev/null 2>&1; then
+      die "could not reset $config_rel_path on $KAI_GIT_MAIN_BRANCH after first-run migration"
+    fi
+  elif ! runuser -u "$KAI_USER" -- git -C "$repo_dir" checkout "$KAI_GIT_MAIN_BRANCH" >/dev/null 2>&1; then
+    die "could not checkout $KAI_GIT_MAIN_BRANCH in $repo_dir"
+  fi
+
+  status_output="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  if [[ -n "$status_output" ]]; then
+    die "$KAI_GIT_MAIN_BRANCH must be clean before sync; commit or stash changes and rerun bootstrap"
+  fi
+
+  main_before="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse "$main_local_ref" 2>/dev/null || true)"
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" merge --ff-only "$KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH" >/dev/null 2>&1; then
+    die "could not fast-forward $KAI_GIT_MAIN_BRANCH to $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH"
+  fi
+  main_after="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse "$main_local_ref" 2>/dev/null || true)"
+  if [[ -n "$main_before" ]] && [[ "$main_before" != "$main_after" ]]; then
+    note_change "fast-forwarded $KAI_GIT_MAIN_BRANCH to $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH"
+  else
+    note_status "$KAI_GIT_MAIN_BRANCH already up to date with $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH"
+  fi
+
+  if [[ "$local_branch_exists" != "1" ]]; then
+    if runuser -u "$KAI_USER" -- git -C "$repo_dir" branch "$KAI_GIT_LOCAL_BRANCH" "$KAI_GIT_MAIN_BRANCH" >/dev/null 2>&1; then
+      note_change "created local rollout branch $KAI_GIT_LOCAL_BRANCH from $KAI_GIT_MAIN_BRANCH"
+      local_branch_exists=1
+    else
+      die "could not create local rollout branch $KAI_GIT_LOCAL_BRANCH"
+    fi
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" branch --set-upstream-to="$KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH" "$KAI_GIT_LOCAL_BRANCH" >/dev/null 2>&1; then
+    die "could not set upstream for $KAI_GIT_LOCAL_BRANCH to $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH"
+  fi
+
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" checkout "$KAI_GIT_LOCAL_BRANCH" >/dev/null 2>&1; then
+    die "could not checkout rollout branch $KAI_GIT_LOCAL_BRANCH"
+  fi
+
+  status_output="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  if [[ -n "$status_output" ]]; then
+    die "$KAI_GIT_LOCAL_BRANCH must be clean before rebase; commit or stash changes and rerun bootstrap"
+  fi
+
+  local_before="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse "$local_branch_ref" 2>/dev/null || true)"
+  if ! runuser -u "$KAI_USER" -- git -C "$repo_dir" rebase "$KAI_GIT_MAIN_BRANCH" >/dev/null 2>&1; then
+    runuser -u "$KAI_USER" -- git -C "$repo_dir" rebase --abort >/dev/null 2>&1 || true
+    die "could not rebase $KAI_GIT_LOCAL_BRANCH onto local $KAI_GIT_MAIN_BRANCH"
+  fi
+  local_after="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse "$local_branch_ref" 2>/dev/null || true)"
+  if [[ -n "$local_before" ]] && [[ "$local_before" != "$local_after" ]]; then
+    note_change "rebased $KAI_GIT_LOCAL_BRANCH onto local $KAI_GIT_MAIN_BRANCH"
+  else
+    note_status "$KAI_GIT_LOCAL_BRANCH already rebased on local $KAI_GIT_MAIN_BRANCH"
+  fi
+
+  remote_head="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse "$main_remote_ref" 2>/dev/null || true)"
+  main_after="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" rev-parse "$main_local_ref" 2>/dev/null || true)"
+  if [[ -n "$main_after" ]] && [[ -n "$remote_head" ]] && [[ "$main_after" == "$remote_head" ]]; then
+    note_status "$KAI_GIT_MAIN_BRANCH is clean and up to date with $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH"
+  else
+    die "$KAI_GIT_MAIN_BRANCH is not aligned with $KAI_GIT_REMOTE/$KAI_GIT_MAIN_BRANCH after bootstrap sync"
+  fi
+
+  if runuser -u "$KAI_USER" -- git -C "$repo_dir" merge-base --is-ancestor "$KAI_GIT_MAIN_BRANCH" "$KAI_GIT_LOCAL_BRANCH" >/dev/null 2>&1; then
+    note_status "$KAI_GIT_LOCAL_BRANCH is rebased on local $KAI_GIT_MAIN_BRANCH"
+  else
+    die "$KAI_GIT_LOCAL_BRANCH is not rebased on local $KAI_GIT_MAIN_BRANCH"
+  fi
+
+  if runuser -u "$KAI_USER" -- git -C "$repo_dir" diff --quiet "$KAI_GIT_MAIN_BRANCH..$KAI_GIT_LOCAL_BRANCH" -- "$config_rel_path"; then
+    note_status "$KAI_GIT_LOCAL_BRANCH has no committed $config_rel_path delta against $KAI_GIT_MAIN_BRANCH"
+  else
+    note_status "$KAI_GIT_LOCAL_BRANCH has committed $config_rel_path overrides"
+  fi
+
+  status_output="$(runuser -u "$KAI_USER" -- git -C "$repo_dir" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  if [[ -n "$status_output" ]]; then
+    die "working tree is not clean on $KAI_GIT_LOCAL_BRANCH after bootstrap sync"
+  fi
+  note_status "working tree clean on $KAI_GIT_LOCAL_BRANCH"
+
+  if [[ "$first_run_config_migration" == "1" && -f "$config_backup_path" ]]; then
+    if cmp -s "$config_backup_path" "$config_path"; then
+      note_status "first-run config.env migration completed on $KAI_GIT_LOCAL_BRANCH"
+    else
+      die "first-run config.env migration verification failed on $KAI_GIT_LOCAL_BRANCH"
+    fi
+  fi
+}
+
 ensure_openwakeword_default_model() {
   local venv_python="$VENV_DIR/bin/python"
   local model_dir="$KAI_STATE_DIR/wakeword/openwakeword"
@@ -1423,6 +1702,8 @@ main() {
   load_config
   prepare_manual_follow_up
   ensure_packages
+  ensure_repo_git_identity
+  ensure_kai_local_git_flow
   ensure_runtime_user_access
   install_raspap_if_requested
   configure_raspap_if_requested

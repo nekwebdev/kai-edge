@@ -839,6 +839,11 @@ ensure_python_venv() {
 ensure_runtime_python_dependencies() {
   local requirements_file="$SCRIPT_DIR/requirements-runtime.txt"
   local venv_python="$VENV_DIR/bin/python"
+  local pip_install_log="$TMP_DIR/runtime-pip-install.log"
+  local pip_attempt=1
+  local pip_max_attempts=3
+  local pip_sync_ok=0
+  local log_line=""
 
   if [[ "$CREATE_VENV" != "1" ]]; then
     warn "cannot install runtime python dependencies automatically because CREATE_VENV=0"
@@ -858,10 +863,32 @@ ensure_runtime_python_dependencies() {
   fi
 
   log "syncing runtime python dependencies from $requirements_file"
-  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input -r "$requirements_file" >/dev/null 2>&1; then
+  : > "$pip_install_log"
+  while (( pip_attempt <= pip_max_attempts )); do
+    if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input -r "$requirements_file" >"$pip_install_log" 2>&1; then
+      pip_sync_ok=1
+      break
+    fi
+    if (( pip_attempt < pip_max_attempts )); then
+      warn "runtime python dependency sync attempt $pip_attempt failed; retrying"
+      sleep 2
+    fi
+    pip_attempt=$((pip_attempt + 1))
+  done
+
+  if [[ "$pip_sync_ok" == "1" ]]; then
     note_change "synced runtime python dependencies into $VENV_DIR"
+    if (( pip_attempt > 1 )); then
+      note_status "runtime python dependency sync succeeded on attempt $pip_attempt of $pip_max_attempts"
+    fi
   else
     warn "could not sync runtime python dependencies from $requirements_file"
+    if [[ -s "$pip_install_log" ]]; then
+      warn "runtime python dependency sync error tail:"
+      while IFS= read -r log_line; do
+        warn "$log_line"
+      done < <(tail -n 20 "$pip_install_log")
+    fi
     note_status "runtime python dependency sync failed; daemon may fall back where supported"
     note_manual "inspect dependency install manually with: sudo -u $KAI_USER $venv_python -m pip install -r $requirements_file"
   fi

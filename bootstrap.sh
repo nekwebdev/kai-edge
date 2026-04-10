@@ -94,12 +94,14 @@ load_config() {
   : "${KAI_HTTP_TIMEOUT_SECONDS:=60}"
   : "${KAI_TRIGGER_MODE:=manual}"
   : "${KAI_TRIGGER_SOCKET_PATH:=/run/kai-edge/trigger.sock}"
-  : "${KAI_WAKEWORD_BACKEND:=porcupine}"
+  : "${KAI_WAKEWORD_BACKEND:=openwakeword}"
   : "${KAI_WAKEWORD_ACCESS_KEY:=}"
   : "${KAI_WAKEWORD_BUILTIN_KEYWORD:=porcupine}"
   : "${KAI_WAKEWORD_KEYWORD_PATH:=}"
   : "${KAI_WAKEWORD_MODEL_PATH:=}"
   : "${KAI_WAKEWORD_SENSITIVITY:=0.5}"
+  : "${KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS:=}"
+  : "${KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD:=0.5}"
   : "${KAI_WAKEWORD_DETECTION_COOLDOWN_MS:=1500}"
   : "${KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS:=3000}"
   : "${KAI_VAD_AGGRESSIVENESS:=3}"
@@ -134,10 +136,10 @@ load_config() {
   esac
 
   case "$KAI_WAKEWORD_BACKEND" in
-    porcupine)
+    porcupine|openwakeword)
       ;;
     *)
-      die "KAI_WAKEWORD_BACKEND must be porcupine (got: $KAI_WAKEWORD_BACKEND)"
+      die "KAI_WAKEWORD_BACKEND must be one of: porcupine, openwakeword (got: $KAI_WAKEWORD_BACKEND)"
       ;;
   esac
 
@@ -150,6 +152,10 @@ load_config() {
     die "KAI_WAKEWORD_SENSITIVITY must be a float between 0 and 1"
   awk -v value="$KAI_WAKEWORD_SENSITIVITY" 'BEGIN { exit !(value >= 0 && value <= 1) }' || \
     die "KAI_WAKEWORD_SENSITIVITY must be between 0 and 1"
+  [[ "$KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+    die "KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD must be a float between 0 and 1"
+  awk -v value="$KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD" 'BEGIN { exit !(value >= 0 && value <= 1) }' || \
+    die "KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD must be between 0 and 1"
 
   if [[ -n "$KAI_WAKEWORD_KEYWORD_PATH" ]] && [[ "$KAI_WAKEWORD_KEYWORD_PATH" != /* ]]; then
     die "KAI_WAKEWORD_KEYWORD_PATH must be absolute when set"
@@ -157,12 +163,26 @@ load_config() {
   if [[ -n "$KAI_WAKEWORD_MODEL_PATH" ]] && [[ "$KAI_WAKEWORD_MODEL_PATH" != /* ]]; then
     die "KAI_WAKEWORD_MODEL_PATH must be absolute when set"
   fi
+  if [[ -n "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS" ]]; then
+    local -a openwakeword_model_paths=()
+    local openwakeword_model_path
+    IFS=',' read -r -a openwakeword_model_paths <<< "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS"
+    for openwakeword_model_path in "${openwakeword_model_paths[@]}"; do
+      openwakeword_model_path="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$openwakeword_model_path")"
+      [[ -z "$openwakeword_model_path" ]] && continue
+      if [[ "$openwakeword_model_path" != /* ]]; then
+        die "KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS must contain only absolute paths"
+      fi
+    done
+  fi
 
   if [[ "$KAI_TRIGGER_MODE" == "wakeword" ]]; then
-    [[ -n "$KAI_WAKEWORD_ACCESS_KEY" ]] || \
-      die "KAI_WAKEWORD_ACCESS_KEY must be set when KAI_TRIGGER_MODE=wakeword"
-    if [[ -z "$KAI_WAKEWORD_BUILTIN_KEYWORD" ]] && [[ -z "$KAI_WAKEWORD_KEYWORD_PATH" ]]; then
-      die "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH for wakeword mode"
+    if [[ "$KAI_WAKEWORD_BACKEND" == "porcupine" ]]; then
+      [[ -n "$KAI_WAKEWORD_ACCESS_KEY" ]] || \
+        die "KAI_WAKEWORD_ACCESS_KEY must be set when KAI_TRIGGER_MODE=wakeword and KAI_WAKEWORD_BACKEND=porcupine"
+      if [[ -z "$KAI_WAKEWORD_BUILTIN_KEYWORD" ]] && [[ -z "$KAI_WAKEWORD_KEYWORD_PATH" ]]; then
+        die "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH for porcupine wakeword mode"
+      fi
     fi
     [[ "$KAI_AUDIO_SAMPLE_RATE" == "16000" ]] || \
       die "wakeword mode currently requires KAI_AUDIO_SAMPLE_RATE=16000"
@@ -305,6 +325,8 @@ render_edge_env() {
     -e "s|__KAI_WAKEWORD_KEYWORD_PATH__|$(escape_sed_replacement "$KAI_WAKEWORD_KEYWORD_PATH")|g" \
     -e "s|__KAI_WAKEWORD_MODEL_PATH__|$(escape_sed_replacement "$KAI_WAKEWORD_MODEL_PATH")|g" \
     -e "s|__KAI_WAKEWORD_SENSITIVITY__|$(escape_sed_replacement "$KAI_WAKEWORD_SENSITIVITY")|g" \
+    -e "s|__KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS__|$(escape_sed_replacement "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS")|g" \
+    -e "s|__KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD__|$(escape_sed_replacement "$KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD")|g" \
     -e "s|__KAI_WAKEWORD_DETECTION_COOLDOWN_MS__|$(escape_sed_replacement "$KAI_WAKEWORD_DETECTION_COOLDOWN_MS")|g" \
     -e "s|__KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS__|$(escape_sed_replacement "$KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS")|g" \
     -e "s|__KAI_VAD_AGGRESSIVENESS__|$(escape_sed_replacement "$KAI_VAD_AGGRESSIVENESS")|g" \
@@ -840,26 +862,141 @@ ensure_runtime_python_dependencies() {
   fi
 
   if runuser -u "$KAI_USER" -- "$venv_python" -c 'import pvporcupine' >/dev/null 2>&1; then
-    note_status "pvporcupine is available for wakeword mode"
+    note_status "pvporcupine is available for wakeword backend porcupine"
+  elif [[ "$KAI_TRIGGER_MODE" == "wakeword" && "$KAI_WAKEWORD_BACKEND" == "porcupine" ]]; then
+    warn "pvporcupine missing after dependency sync; trying direct install"
+    if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input pvporcupine >/dev/null 2>&1; then
+      note_change "installed pvporcupine into $VENV_DIR"
+      note_status "pvporcupine is available for wakeword backend porcupine"
+    else
+      warn "could not install pvporcupine into $VENV_DIR"
+      note_status "pvporcupine install failed; wakeword backend porcupine will not start"
+      note_manual "inspect porcupine dependency install manually with: sudo -u $KAI_USER $venv_python -m pip install pvporcupine"
+    fi
+  else
+    note_status "pvporcupine is not installed; wakeword backend porcupine will be unavailable until dependencies are synced"
+  fi
+
+  if runuser -u "$KAI_USER" -- "$venv_python" -c 'import openwakeword' >/dev/null 2>&1; then
+    note_status "openwakeword is available for wakeword backend openwakeword"
     return 0
   fi
 
-  if [[ "$KAI_TRIGGER_MODE" != "wakeword" ]]; then
-    note_status "pvporcupine is not installed; wakeword mode will be unavailable until dependencies are synced"
+  if [[ "$KAI_TRIGGER_MODE" != "wakeword" || "$KAI_WAKEWORD_BACKEND" != "openwakeword" ]]; then
+    note_status "openwakeword is not installed; wakeword backend openwakeword will be unavailable until dependencies are synced"
     return 0
   fi
 
-  warn "pvporcupine missing after dependency sync; trying direct install"
-  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input pvporcupine >/dev/null 2>&1; then
-    note_change "installed pvporcupine into $VENV_DIR"
-    note_status "pvporcupine is available for wakeword mode"
+  warn "openwakeword missing after dependency sync; trying direct install"
+  if runuser -u "$KAI_USER" -- "$venv_python" -m pip install --disable-pip-version-check --no-input openwakeword >/dev/null 2>&1; then
+    note_change "installed openwakeword into $VENV_DIR"
+    note_status "openwakeword is available for wakeword backend openwakeword"
     return 0
   fi
 
-  warn "could not install pvporcupine into $VENV_DIR"
-  note_status "pvporcupine install failed; wakeword mode will not start"
-  note_manual "inspect wakeword package install manually with: sudo -u $KAI_USER $venv_python -m pip install pvporcupine"
+  warn "could not install openwakeword into $VENV_DIR"
+  note_status "openwakeword install failed; wakeword backend openwakeword will not start"
+  note_manual "inspect openwakeword dependency install manually with: sudo -u $KAI_USER $venv_python -m pip install openwakeword"
   return 0
+}
+
+ensure_openwakeword_default_model() {
+  local venv_python="$VENV_DIR/bin/python"
+  local model_dir="$KAI_STATE_DIR/wakeword/openwakeword"
+  local model_path=""
+
+  if [[ "$CREATE_VENV" != "1" ]]; then
+    note_status "openwakeword model prefetch skipped (CREATE_VENV=0)"
+    return 0
+  fi
+
+  if [[ ! -x "$venv_python" ]]; then
+    warn "cannot prefetch openwakeword model because venv python is missing: $venv_python"
+    return 0
+  fi
+
+  if ! runuser -u "$KAI_USER" -- "$venv_python" -c 'import openwakeword' >/dev/null 2>&1; then
+    note_status "openwakeword model prefetch skipped (openwakeword dependency unavailable)"
+    return 0
+  fi
+
+  ensure_dir "$model_dir" 0755 "$KAI_USER" "$KAI_GROUP"
+
+  if ! model_path="$(
+    runuser -u "$KAI_USER" -- env KAI_OPENWAKEWORD_MODEL_DIR="$model_dir" "$venv_python" - <<'PY'
+import os
+import shutil
+from pathlib import Path
+
+import openwakeword
+from openwakeword import utils
+
+target_dir = Path(os.environ["KAI_OPENWAKEWORD_MODEL_DIR"]).resolve()
+target_dir.mkdir(parents=True, exist_ok=True)
+
+# try a one-time model sync via the official utility.
+try:
+    utils.download_models()
+except Exception:
+    pass
+
+candidate_roots = [
+    target_dir,
+    Path(openwakeword.__file__).resolve().parent,
+    Path.home() / ".cache" / "openwakeword",
+    Path.home() / ".local" / "share" / "openwakeword",
+]
+patterns = ("*hey_jarvis*.tflite", "*hey_jarvis*.onnx")
+
+candidates = []
+seen = set()
+for root in candidate_roots:
+    if not root.exists():
+        continue
+    for pattern in patterns:
+        for path in root.rglob(pattern):
+            resolved = path.resolve()
+            key = str(resolved)
+            if key in seen or not resolved.is_file():
+                continue
+            seen.add(key)
+            candidates.append(resolved)
+
+if not candidates:
+    raise SystemExit(2)
+
+def score(path):
+    # prefer tflite over onnx on linux for lower runtime cost.
+    suffix_rank = 0 if path.suffix.lower() == ".tflite" else 1
+    return (suffix_rank, len(path.name), path.name)
+
+best = sorted(candidates, key=score)[0]
+destination = target_dir / best.name
+if best != destination:
+    shutil.copy2(best, destination)
+
+print(destination)
+PY
+  )"; then
+    warn "could not prefetch openwakeword hey_jarvis model"
+    note_status "openwakeword dependency is installed, but hey_jarvis model prefetch failed"
+    note_manual "set KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS manually to a local hey_jarvis model path if wake detection is unstable"
+    return 0
+  fi
+
+  if [[ -z "$model_path" ]]; then
+    warn "openwakeword model prefetch returned an empty model path"
+    return 0
+  fi
+
+  if [[ -z "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS" ]]; then
+    KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS="$model_path"
+    note_change "prefetched openwakeword hey_jarvis model: $model_path"
+    note_status "openwakeword default wake model pinned to hey_jarvis"
+    return 0
+  fi
+
+  note_status "openwakeword model path(s) provided in config.env; leaving configured value unchanged"
 }
 
 ensure_runtime_user_access() {
@@ -1202,6 +1339,14 @@ prepare_manual_follow_up() {
     note_manual "VAD mode is armed listening; use the physical mute switch during development testing"
   elif [[ "$KAI_TRIGGER_MODE" == "wakeword" ]]; then
     note_status "wakeword backend configured: $KAI_WAKEWORD_BACKEND"
+    if [[ "$KAI_WAKEWORD_BACKEND" == "openwakeword" ]]; then
+      if [[ -n "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS" ]]; then
+        note_status "openwakeword model path(s): $KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS"
+      else
+        note_status "openwakeword using backend defaults (no explicit model paths configured)"
+      fi
+      note_status "openwakeword wake phrase target: hey jarvis"
+    fi
     note_manual "wakeword mode keeps passive listening armed; use the physical mute switch when not actively testing"
     note_manual "validate wakeword flow end-to-end with: sudo journalctl -u kai-edge.service -f and $EDGE_STATUS_DEST"
   fi
@@ -1290,6 +1435,7 @@ main() {
   ensure_base_directories
   ensure_python_venv
   ensure_runtime_python_dependencies
+  ensure_openwakeword_default_model
   install_ssh_hardening
   reload_ssh_if_needed
   enable_avahi_if_requested

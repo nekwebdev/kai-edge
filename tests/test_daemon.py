@@ -10,13 +10,23 @@ from kai_edge.errors import EdgeRuntimeError
 
 
 class EdgeDaemonTests(unittest.TestCase):
-    def _make_daemon(self, *, trigger_mode: str = "manual") -> EdgeDaemon:
+    def _make_daemon(
+        self,
+        *,
+        trigger_mode: str = "manual",
+        wakeword_backend: str | None = None,
+    ) -> EdgeDaemon:
         settings = {
             "KAI_TRIGGER_MODE": trigger_mode,
             "KAI_OBS_STATUS_FILE_ENABLED": "0",
         }
+        if wakeword_backend is not None:
+            settings["KAI_WAKEWORD_BACKEND"] = wakeword_backend
         if trigger_mode == "wakeword":
-            settings["KAI_WAKEWORD_ACCESS_KEY"] = "test-access-key"
+            selected_backend = settings.get("KAI_WAKEWORD_BACKEND", "porcupine")
+            settings["KAI_WAKEWORD_BACKEND"] = selected_backend
+            if selected_backend == "porcupine":
+                settings["KAI_WAKEWORD_ACCESS_KEY"] = "test-access-key"
         config = build_edge_config(file_settings=settings)
         logger = logging.getLogger("test-daemon")
         return EdgeDaemon(config=config, logger=logger)
@@ -53,6 +63,24 @@ class EdgeDaemonTests(unittest.TestCase):
 
     def test_serve_forever_uses_wakeword_mode_loop(self) -> None:
         daemon = self._make_daemon(trigger_mode="wakeword")
+        with (
+            mock.patch("signal.signal"),
+            mock.patch.object(daemon, "_serve_manual_mode", return_value=7) as manual_loop,
+            mock.patch.object(daemon, "_serve_vad_mode", return_value=9) as vad_loop,
+            mock.patch.object(daemon, "_serve_wakeword_mode", return_value=11) as wakeword_loop,
+        ):
+            result = daemon.serve_forever()
+
+        self.assertEqual(result, 11)
+        manual_loop.assert_not_called()
+        vad_loop.assert_not_called()
+        wakeword_loop.assert_called_once_with()
+
+    def test_serve_forever_uses_wakeword_mode_loop_for_openwakeword_backend(self) -> None:
+        daemon = self._make_daemon(
+            trigger_mode="wakeword",
+            wakeword_backend="openwakeword",
+        )
         with (
             mock.patch("signal.signal"),
             mock.patch.object(daemon, "_serve_manual_mode", return_value=7) as manual_loop,

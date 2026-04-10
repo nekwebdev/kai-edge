@@ -140,6 +140,10 @@ normalize_bool() {
   esac
 }
 
+trim_whitespace() {
+  sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
 check_required_directories() {
   check_directory "$KAI_ROOT"
   check_directory "$KAI_APP_DIR"
@@ -184,7 +188,9 @@ check_runtime_user() {
 check_runtime_files() {
   local backend_url trigger_mode trigger_socket sample_rate
   local wakeword_backend wakeword_access_key wakeword_builtin_keyword wakeword_keyword_path wakeword_model_path
-  local wakeword_sensitivity wakeword_cooldown_ms wakeword_speech_timeout_ms
+  local wakeword_sensitivity wakeword_openwakeword_model_paths wakeword_openwakeword_threshold
+  local wakeword_cooldown_ms wakeword_speech_timeout_ms openwakeword_model_path
+  local -a openwakeword_model_paths=()
   local vad_aggressiveness vad_frame_ms vad_min_speech_ms vad_min_speech_run_ms vad_trailing_silence_ms
   local vad_max_utterance_ms vad_cooldown_ms vad_energy_threshold
   local obs_summary_seconds obs_summary_interactions obs_status_enabled_raw obs_status_enabled
@@ -344,63 +350,17 @@ check_runtime_files() {
       (
         # shellcheck source=/dev/null
         source "$EDGE_ENV_FILE"
-        printf '%s' "${KAI_WAKEWORD_BACKEND:-porcupine}"
+        printf '%s' "${KAI_WAKEWORD_BACKEND:-openwakeword}"
       ) 2>/dev/null || true
     )"
     case "$wakeword_backend" in
-      porcupine)
+      porcupine|openwakeword)
         ok "wakeword backend configured: $wakeword_backend"
         ;;
       *)
-        fail "unsupported KAI_WAKEWORD_BACKEND in $EDGE_ENV_FILE: ${wakeword_backend:-<blank>}"
+        fail "unsupported KAI_WAKEWORD_BACKEND in $EDGE_ENV_FILE: ${wakeword_backend:-<blank>} (expected porcupine or openwakeword)"
         ;;
     esac
-
-    wakeword_access_key="$(
-      (
-        # shellcheck source=/dev/null
-        source "$EDGE_ENV_FILE"
-        printf '%s' "${KAI_WAKEWORD_ACCESS_KEY:-}"
-      ) 2>/dev/null || true
-    )"
-    if [[ -n "$wakeword_access_key" ]]; then
-      ok "wakeword access key is configured"
-    else
-      fail "KAI_WAKEWORD_ACCESS_KEY is blank in $EDGE_ENV_FILE"
-    fi
-
-    wakeword_builtin_keyword="$(
-      (
-        # shellcheck source=/dev/null
-        source "$EDGE_ENV_FILE"
-        printf '%s' "${KAI_WAKEWORD_BUILTIN_KEYWORD:-porcupine}"
-      ) 2>/dev/null || true
-    )"
-    wakeword_keyword_path="$(
-      (
-        # shellcheck source=/dev/null
-        source "$EDGE_ENV_FILE"
-        printf '%s' "${KAI_WAKEWORD_KEYWORD_PATH:-}"
-      ) 2>/dev/null || true
-    )"
-    if [[ -n "$wakeword_builtin_keyword" ]] || [[ -n "$wakeword_keyword_path" ]]; then
-      ok "wakeword keyword source configured"
-    else
-      fail "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH in $EDGE_ENV_FILE"
-    fi
-
-    if [[ -n "$wakeword_keyword_path" ]]; then
-      if [[ "$wakeword_keyword_path" = /* ]]; then
-        ok "wakeword keyword path is absolute: $wakeword_keyword_path"
-      else
-        fail "KAI_WAKEWORD_KEYWORD_PATH must be absolute: $wakeword_keyword_path"
-      fi
-      if [[ -f "$wakeword_keyword_path" ]]; then
-        ok "wakeword keyword file exists: $wakeword_keyword_path"
-      else
-        fail "wakeword keyword file missing: $wakeword_keyword_path"
-      fi
-    fi
 
     wakeword_model_path="$(
       (
@@ -433,6 +393,108 @@ check_runtime_files() {
       ok "wakeword sensitivity configured: $wakeword_sensitivity"
     else
       fail "invalid KAI_WAKEWORD_SENSITIVITY in $EDGE_ENV_FILE: ${wakeword_sensitivity:-<blank>}"
+    fi
+
+    wakeword_openwakeword_threshold="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD:-0.5}"
+      ) 2>/dev/null || true
+    )"
+    if [[ "$wakeword_openwakeword_threshold" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v value="$wakeword_openwakeword_threshold" 'BEGIN { exit !(value >= 0 && value <= 1) }'; then
+      ok "openwakeword threshold configured: $wakeword_openwakeword_threshold"
+    else
+      fail "invalid KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD in $EDGE_ENV_FILE: ${wakeword_openwakeword_threshold:-<blank>}"
+    fi
+
+    if [[ "$wakeword_backend" == "porcupine" ]]; then
+      wakeword_access_key="$(
+        (
+          # shellcheck source=/dev/null
+          source "$EDGE_ENV_FILE"
+          printf '%s' "${KAI_WAKEWORD_ACCESS_KEY:-}"
+        ) 2>/dev/null || true
+      )"
+      if [[ -n "$wakeword_access_key" ]]; then
+        ok "wakeword access key is configured"
+      else
+        fail "KAI_WAKEWORD_ACCESS_KEY is blank in $EDGE_ENV_FILE for wakeword backend porcupine"
+      fi
+
+      wakeword_builtin_keyword="$(
+        (
+          # shellcheck source=/dev/null
+          source "$EDGE_ENV_FILE"
+          printf '%s' "${KAI_WAKEWORD_BUILTIN_KEYWORD:-porcupine}"
+        ) 2>/dev/null || true
+      )"
+      wakeword_keyword_path="$(
+        (
+          # shellcheck source=/dev/null
+          source "$EDGE_ENV_FILE"
+          printf '%s' "${KAI_WAKEWORD_KEYWORD_PATH:-}"
+        ) 2>/dev/null || true
+      )"
+      if [[ -n "$wakeword_builtin_keyword" ]] || [[ -n "$wakeword_keyword_path" ]]; then
+        ok "wakeword keyword source configured"
+      else
+        fail "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH in $EDGE_ENV_FILE for wakeword backend porcupine"
+      fi
+
+      if [[ -n "$wakeword_keyword_path" ]]; then
+        if [[ "$wakeword_keyword_path" = /* ]]; then
+          ok "wakeword keyword path is absolute: $wakeword_keyword_path"
+        else
+          fail "KAI_WAKEWORD_KEYWORD_PATH must be absolute: $wakeword_keyword_path"
+        fi
+        if [[ -f "$wakeword_keyword_path" ]]; then
+          ok "wakeword keyword file exists: $wakeword_keyword_path"
+        else
+          fail "wakeword keyword file missing: $wakeword_keyword_path"
+        fi
+      fi
+    elif [[ "$wakeword_backend" == "openwakeword" ]]; then
+      wakeword_openwakeword_model_paths="$(
+        (
+          # shellcheck source=/dev/null
+          source "$EDGE_ENV_FILE"
+          printf '%s' "${KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS:-}"
+        ) 2>/dev/null || true
+      )"
+      if [[ -z "$wakeword_openwakeword_model_paths" ]]; then
+        ok "openwakeword model paths not set; backend defaults will be used"
+      else
+        IFS=',' read -r -a openwakeword_model_paths <<< "$wakeword_openwakeword_model_paths"
+        for openwakeword_model_path in "${openwakeword_model_paths[@]}"; do
+          openwakeword_model_path="$(printf '%s' "$openwakeword_model_path" | trim_whitespace)"
+          [[ -z "$openwakeword_model_path" ]] && continue
+          if [[ "$openwakeword_model_path" = /* ]]; then
+            ok "openwakeword model path is absolute: $openwakeword_model_path"
+          else
+            fail "KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS must contain only absolute paths: $openwakeword_model_path"
+            continue
+          fi
+          if [[ -f "$openwakeword_model_path" ]]; then
+            ok "openwakeword model file exists: $openwakeword_model_path"
+          else
+            fail "openwakeword model file missing: $openwakeword_model_path"
+          fi
+        done
+      fi
+
+      wakeword_access_key="$(
+        (
+          # shellcheck source=/dev/null
+          source "$EDGE_ENV_FILE"
+          printf '%s' "${KAI_WAKEWORD_ACCESS_KEY:-}"
+        ) 2>/dev/null || true
+      )"
+      if [[ -n "$wakeword_access_key" ]]; then
+        warn "KAI_WAKEWORD_ACCESS_KEY is set but not required for wakeword backend openwakeword"
+      else
+        ok "wakeword access key is not required for backend openwakeword"
+      fi
     fi
 
     wakeword_cooldown_ms="$(
@@ -1008,6 +1070,7 @@ check_logging_retention_state() {
 
 check_runtime_status_artifact() {
   local status_enabled_raw status_enabled status_path active_state trigger_mode status_mode
+  local configured_wake_backend status_wake_backend
 
   if [[ ! -f "$EDGE_ENV_FILE" ]]; then
     warn "cannot validate runtime status artifact because edge env file is missing: $EDGE_ENV_FILE"
@@ -1088,10 +1151,27 @@ check_runtime_status_artifact() {
   fi
 
   if [[ "$trigger_mode" == "wakeword" ]]; then
-    if jq -e '.wake_backend != null and .wake_backend != "" and .wake_backend != "n/a"' "$status_path" >/dev/null 2>&1; then
-      ok "runtime status artifact reports active wake backend"
+    configured_wake_backend="$(
+      (
+        # shellcheck source=/dev/null
+        source "$EDGE_ENV_FILE"
+        printf '%s' "${KAI_WAKEWORD_BACKEND:-openwakeword}"
+      ) 2>/dev/null || true
+    )"
+    case "$configured_wake_backend" in
+      porcupine|openwakeword)
+        ;;
+      *)
+        fail "invalid KAI_WAKEWORD_BACKEND in runtime env for status check: ${configured_wake_backend:-<blank>}"
+        configured_wake_backend=""
+        ;;
+    esac
+
+    status_wake_backend="$(jq -r '.wake_backend // ""' "$status_path" 2>/dev/null || true)"
+    if [[ -n "$configured_wake_backend" && "$status_wake_backend" == "$configured_wake_backend" ]]; then
+      ok "runtime status artifact wake backend matches configured backend: $status_wake_backend"
     else
-      fail "runtime status artifact does not report an active wake backend while in wakeword mode"
+      fail "runtime status artifact wake backend mismatch: expected ${configured_wake_backend:-<blank>}, got ${status_wake_backend:-<blank>}"
     fi
   fi
 
@@ -1157,7 +1237,7 @@ PY
 }
 
 check_pvporcupine_dependency() {
-  local trigger_mode
+  local trigger_mode wakeword_backend
 
   if [[ "$CREATE_VENV" != "1" ]]; then
     warn "CREATE_VENV=0; runtime python dependency sync is disabled"
@@ -1176,16 +1256,63 @@ check_pvporcupine_dependency() {
       printf '%s' "${KAI_TRIGGER_MODE:-manual}"
     ) 2>/dev/null || true
   )"
+  wakeword_backend="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_WAKEWORD_BACKEND:-openwakeword}"
+    ) 2>/dev/null || true
+  )"
 
   if "$KAI_VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
 import pvporcupine
 PY
   then
     ok "pvporcupine available in managed venv"
-  elif [[ "$trigger_mode" == "wakeword" ]]; then
-    fail "pvporcupine missing in managed venv while wakeword mode is configured"
+  elif [[ "$trigger_mode" == "wakeword" && "$wakeword_backend" == "porcupine" ]]; then
+    fail "pvporcupine missing in managed venv while wakeword backend porcupine is configured"
   else
-    warn "pvporcupine missing in managed venv; wakeword mode will be unavailable"
+    warn "pvporcupine missing in managed venv; wakeword backend porcupine will be unavailable"
+  fi
+}
+
+check_openwakeword_dependency() {
+  local trigger_mode wakeword_backend
+
+  if [[ "$CREATE_VENV" != "1" ]]; then
+    warn "CREATE_VENV=0; runtime python dependency sync is disabled"
+    return 0
+  fi
+
+  if [[ ! -x "$KAI_VENV_DIR/bin/python" ]]; then
+    warn "venv python missing; skipping openwakeword check"
+    return 0
+  fi
+
+  trigger_mode="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_TRIGGER_MODE:-manual}"
+    ) 2>/dev/null || true
+  )"
+  wakeword_backend="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_WAKEWORD_BACKEND:-openwakeword}"
+    ) 2>/dev/null || true
+  )"
+
+  if "$KAI_VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
+import openwakeword
+PY
+  then
+    ok "openwakeword available in managed venv"
+  elif [[ "$trigger_mode" == "wakeword" && "$wakeword_backend" == "openwakeword" ]]; then
+    fail "openwakeword missing in managed venv while wakeword backend openwakeword is configured"
+  else
+    warn "openwakeword missing in managed venv; wakeword backend openwakeword will be unavailable"
   fi
 }
 
@@ -1260,6 +1387,7 @@ main() {
   check_python_venv
   check_webrtcvad_dependency
   check_pvporcupine_dependency
+  check_openwakeword_dependency
   check_audio_visibility
   print_summary
 

@@ -64,6 +64,7 @@ it does not manage:
 │   ├── test_daemon.py
 │   ├── test_observability.py
 │   ├── test_vad_session.py
+│   ├── test_wakeword.py
 │   └── test_wakeword_runtime.py
 └── README.md
 ```
@@ -133,18 +134,25 @@ when enabled, the daemon writes a runtime status artifact to `/run/kai-edge/stat
 the daemon prefers the lightweight `webrtcvad` python module when available.
 if it is missing or the sample rate is unsupported, it falls back to an internal energy-threshold detector.
 
-for wakeword detection, the daemon uses `pvporcupine` (picovoice porcupine):
+for wakeword detection, the daemon supports two backends:
 
-- practical on raspberry pi with low runtime cpu overhead
-- local/offline inference at runtime
-- stable python integration
-- explicit model/keyword configuration surface for operators
+- `openwakeword` (default):
+  - no access-key signup required
+  - local/offline inference at runtime
+  - bootstrap pins `hey_jarvis` by default when no custom model path is set
+  - can use custom model paths
+  - usually higher cpu usage than porcupine on raspberry pi
+- `porcupine` (`pvporcupine`):
+  - very low runtime cpu overhead on raspberry pi
+  - local/offline inference at runtime
+  - stable python integration
+  - requires picovoice access key and keyword configuration
 
-tradeoffs for porcupine in this phase:
+operator guidance:
 
-- requires `KAI_WAKEWORD_ACCESS_KEY`
-- custom keyword/model files must be managed when not using a built-in keyword
-- wakeword quality still depends on mic placement, gain, and room noise
+- choose `openwakeword` if you want a zero-signup setup and can afford higher cpu.
+- choose `porcupine` if you want lower cpu and have a valid `KAI_WAKEWORD_ACCESS_KEY`.
+- for both backends, quality still depends on mic placement, gain, and room noise.
 
 this keeps deployment simple and avoids heavyweight speech stacks while still giving a practical daily-use wake + utterance loop for pi testing.
 
@@ -166,6 +174,7 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - `/etc/logrotate.d/kai-edge`: managed rotation policy for optional `/var/log/kai/*.log` files
 - `/run/kai-edge/status.json`: daemon runtime status artifact (when enabled)
 - `/var/lib/kai`: service state
+- `/var/lib/kai/wakeword/openwakeword`: bootstrap-managed openwakeword model cache
 - `/var/log/kai`: optional file-log location for edge components
 - `/etc/ssh/sshd_config.d/60-kai-hardening.conf`: conservative ssh hardening
 
@@ -182,6 +191,7 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - creates base directories
 - optionally creates a python venv
 - syncs runtime python dependencies into the managed venv (when `CREATE_VENV=1`)
+- prefetches and pins an openwakeword `hey_jarvis` model when openwakeword is available and no custom openwakeword model path is configured
 - ensures runtime user is in the `audio` group
 - installs managed ssh hardening and validates `sshd -t`
 - optionally enables `avahi-daemon` for `kai.local`
@@ -237,12 +247,15 @@ trigger keys:
 
 wakeword keys:
 
-- `KAI_WAKEWORD_BACKEND` (currently `porcupine`)
-- `KAI_WAKEWORD_ACCESS_KEY`
+- `KAI_WAKEWORD_BACKEND` (`openwakeword` default, or `porcupine`)
+- `KAI_WAKEWORD_ACCESS_KEY` (required for `porcupine`, ignored by `openwakeword`)
 - `KAI_WAKEWORD_BUILTIN_KEYWORD` (default `porcupine`)
 - `KAI_WAKEWORD_KEYWORD_PATH` (optional absolute path to `.ppn`)
 - `KAI_WAKEWORD_MODEL_PATH` (optional absolute path to `.pv`)
 - `KAI_WAKEWORD_SENSITIVITY` (`0.0` to `1.0`)
+- `KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS` (optional comma-separated absolute model paths)
+- if blank, bootstrap tries to pin `hey_jarvis` automatically under `/var/lib/kai/wakeword/openwakeword/`
+- `KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD` (`0.0` to `1.0`)
 - `KAI_WAKEWORD_DETECTION_COOLDOWN_MS`
 - `KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS`
 
@@ -271,10 +284,12 @@ observability keys:
    - `manual` for explicit socket trigger
    - `vad` for armed listening
    - `wakeword` for passive wake detection + VAD post-wake capture
-2. if using `wakeword`, set at least:
-   - `KAI_WAKEWORD_ACCESS_KEY`
-   - `KAI_WAKEWORD_BUILTIN_KEYWORD` or `KAI_WAKEWORD_KEYWORD_PATH`
-   - `KAI_AUDIO_SAMPLE_RATE="16000"`
+2. if using `wakeword`:
+   - set `KAI_AUDIO_SAMPLE_RATE="16000"`
+   - choose `KAI_WAKEWORD_BACKEND`
+   - if backend is `porcupine`, set `KAI_WAKEWORD_ACCESS_KEY` and keyword source (`KAI_WAKEWORD_BUILTIN_KEYWORD` or `KAI_WAKEWORD_KEYWORD_PATH`)
+   - if backend is `openwakeword`, leave `KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS` blank to use bootstrap-pinned `hey_jarvis`, or set your own model path(s)
+   - tune `KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD` as needed
 3. rerun bootstrap:
 
 ```bash
@@ -431,7 +446,7 @@ sudo /opt/kai/bin/kai-doctor
 - managed journald retention config shape when enabled
 - managed logrotate policy presence and file-log coverage under `/var/log/kai`
 - python venv and alsa device visibility
-- webrtcvad and pvporcupine availability in the managed venv when enabled
+- webrtcvad, pvporcupine, and openwakeword availability in the managed venv when relevant
 
 in VAD or wakeword mode, doctor explicitly does not claim end-to-end acoustic quality; it only validates safe/static runtime shape.
 

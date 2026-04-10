@@ -74,26 +74,47 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.trigger_mode, "vad")
 
     def test_build_edge_config_accepts_wakeword_trigger_mode(self) -> None:
-        config = build_edge_config(
-            file_settings={
-                "KAI_TRIGGER_MODE": "wakeword",
-                "KAI_WAKEWORD_ACCESS_KEY": "test-access-key",
-            }
-        )
+        config = build_edge_config(file_settings={"KAI_TRIGGER_MODE": "wakeword"})
         self.assertEqual(config.trigger_mode, "wakeword")
         self.assertEqual(config.wakeword_backend, DEFAULT_WAKEWORD_BACKEND)
 
-    def test_build_edge_config_rejects_wakeword_mode_without_access_key(self) -> None:
+    def test_build_edge_config_rejects_porcupine_wakeword_mode_without_access_key(self) -> None:
         with self.assertRaises(EdgeConfigError):
-            build_edge_config(file_settings={"KAI_TRIGGER_MODE": "wakeword"})
+            build_edge_config(
+                file_settings={
+                    "KAI_TRIGGER_MODE": "wakeword",
+                    "KAI_WAKEWORD_BACKEND": "porcupine",
+                }
+            )
 
     def test_build_edge_config_rejects_invalid_wakeword_sensitivity(self) -> None:
         with self.assertRaises(EdgeConfigError):
             build_edge_config(file_settings={"KAI_WAKEWORD_SENSITIVITY": "1.5"})
 
+    def test_build_edge_config_rejects_invalid_openwakeword_threshold(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD": "1.5"})
+
     def test_build_edge_config_rejects_relative_wakeword_keyword_path(self) -> None:
         with self.assertRaises(EdgeConfigError):
             build_edge_config(file_settings={"KAI_WAKEWORD_KEYWORD_PATH": "models/kai.ppn"})
+
+    def test_build_edge_config_accepts_openwakeword_model_paths(self) -> None:
+        config = build_edge_config(
+            file_settings={
+                "KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS": " /opt/kai/models/a.onnx, /opt/kai/models/b.onnx ",
+            }
+        )
+        self.assertEqual(
+            config.wakeword_openwakeword_model_paths,
+            ("/opt/kai/models/a.onnx", "/opt/kai/models/b.onnx"),
+        )
+
+    def test_build_edge_config_rejects_relative_openwakeword_model_path(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(
+                file_settings={"KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS": "/opt/a.onnx,models/b.onnx"}
+            )
 
     def test_build_edge_config_rejects_invalid_trigger_mode(self) -> None:
         with self.assertRaises(EdgeConfigError):

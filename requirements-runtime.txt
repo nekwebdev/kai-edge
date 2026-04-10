@@ -1,3 +1,4 @@
 # runtime python dependencies for kai-edge daemon
 webrtcvad-wheels
 pvporcupine
+openwakeword

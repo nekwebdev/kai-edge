@@ -15,10 +15,11 @@ DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_TRIGGER_SOCKET_PATH = "/run/kai-edge/trigger.sock"
 DEFAULT_TRIGGER_MODE = "manual"
 VALID_TRIGGER_MODES = ("manual", "vad", "wakeword")
-DEFAULT_WAKEWORD_BACKEND = "porcupine"
-VALID_WAKEWORD_BACKENDS = ("porcupine",)
+DEFAULT_WAKEWORD_BACKEND = "openwakeword"
+VALID_WAKEWORD_BACKENDS = ("porcupine", "openwakeword")
 DEFAULT_WAKEWORD_BUILTIN_KEYWORD = "porcupine"
 DEFAULT_WAKEWORD_SENSITIVITY = 0.5
+DEFAULT_WAKEWORD_OPENWAKEWORD_THRESHOLD = 0.5
 DEFAULT_WAKEWORD_DETECTION_COOLDOWN_MS = 1500
 DEFAULT_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS = 3000
 DEFAULT_VAD_AGGRESSIVENESS = 3
@@ -52,6 +53,8 @@ class EdgeConfig:
     wakeword_keyword_path: str | None
     wakeword_model_path: str | None
     wakeword_sensitivity: float
+    wakeword_openwakeword_model_paths: tuple[str, ...]
+    wakeword_openwakeword_threshold: float
     wakeword_detection_cooldown_ms: int
     wakeword_post_wake_speech_timeout_ms: int
     vad_aggressiveness: int
@@ -112,6 +115,23 @@ def parse_wakeword_backend(raw_value: str) -> str:
         valid_backends = ", ".join(VALID_WAKEWORD_BACKENDS)
         raise EdgeConfigError(f"KAI_WAKEWORD_BACKEND must be one of: {valid_backends}")
     return value
+
+
+def parse_absolute_path_list(raw_value: str, *, setting_name: str) -> tuple[str, ...]:
+    stripped = raw_value.strip()
+    if not stripped:
+        return ()
+
+    values: list[str] = []
+    for raw_item in stripped.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if not item.startswith("/"):
+            raise EdgeConfigError(f"{setting_name} must contain only absolute paths")
+        values.append(item)
+
+    return tuple(values)
 
 
 def bounded_float(
@@ -221,6 +241,8 @@ def build_edge_config(
         "KAI_WAKEWORD_KEYWORD_PATH": "",
         "KAI_WAKEWORD_MODEL_PATH": "",
         "KAI_WAKEWORD_SENSITIVITY": str(DEFAULT_WAKEWORD_SENSITIVITY),
+        "KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS": "",
+        "KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD": str(DEFAULT_WAKEWORD_OPENWAKEWORD_THRESHOLD),
         "KAI_WAKEWORD_DETECTION_COOLDOWN_MS": str(DEFAULT_WAKEWORD_DETECTION_COOLDOWN_MS),
         "KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS": str(
             DEFAULT_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS
@@ -285,6 +307,16 @@ def build_edge_config(
     wakeword_sensitivity = bounded_float(
         _get_setting("KAI_WAKEWORD_SENSITIVITY", file_settings, defaults, overrides),
         "KAI_WAKEWORD_SENSITIVITY",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    wakeword_openwakeword_model_paths = parse_absolute_path_list(
+        _get_setting("KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS", file_settings, defaults, overrides),
+        setting_name="KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS",
+    )
+    wakeword_openwakeword_threshold = bounded_float(
+        _get_setting("KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD", file_settings, defaults, overrides),
+        "KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD",
         minimum=0.0,
         maximum=1.0,
     )
@@ -367,14 +399,17 @@ def build_edge_config(
     if wakeword_model_path is not None and not wakeword_model_path.startswith("/"):
         raise EdgeConfigError("KAI_WAKEWORD_MODEL_PATH must be an absolute path")
     if trigger_mode == "wakeword":
-        if wakeword_backend == "porcupine" and not wakeword_access_key:
-            raise EdgeConfigError(
-                "KAI_WAKEWORD_ACCESS_KEY must be set when KAI_TRIGGER_MODE=wakeword"
-            )
-        if wakeword_keyword_path is None and wakeword_builtin_keyword is None:
-            raise EdgeConfigError(
-                "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH for wakeword mode"
-            )
+        if wakeword_backend == "porcupine":
+            if not wakeword_access_key:
+                raise EdgeConfigError(
+                    "KAI_WAKEWORD_ACCESS_KEY must be set when "
+                    "KAI_TRIGGER_MODE=wakeword and KAI_WAKEWORD_BACKEND=porcupine"
+                )
+            if wakeword_keyword_path is None and wakeword_builtin_keyword is None:
+                raise EdgeConfigError(
+                    "set KAI_WAKEWORD_BUILTIN_KEYWORD or KAI_WAKEWORD_KEYWORD_PATH for "
+                    "porcupine wakeword mode"
+                )
     if vad_max_utterance_ms <= vad_min_speech_ms:
         raise EdgeConfigError("KAI_VAD_MAX_UTTERANCE_MS must be greater than KAI_VAD_MIN_SPEECH_MS")
     if vad_max_utterance_ms <= vad_min_speech_run_ms:
@@ -397,6 +432,8 @@ def build_edge_config(
         wakeword_keyword_path=wakeword_keyword_path,
         wakeword_model_path=wakeword_model_path,
         wakeword_sensitivity=wakeword_sensitivity,
+        wakeword_openwakeword_model_paths=wakeword_openwakeword_model_paths,
+        wakeword_openwakeword_threshold=wakeword_openwakeword_threshold,
         wakeword_detection_cooldown_ms=wakeword_detection_cooldown_ms,
         wakeword_post_wake_speech_timeout_ms=wakeword_post_wake_speech_timeout_ms,
         vad_aggressiveness=vad_aggressiveness,

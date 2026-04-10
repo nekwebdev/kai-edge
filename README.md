@@ -29,6 +29,8 @@ it does not manage:
 │   │   └── kai-edge-retention.conf.tmpl
 │   ├── logrotate
 │   │   └── kai-edge.tmpl
+│   ├── wakeword
+│   │   └── openwakeword
 │   ├── ssh
 │   │   └── 60-kai-hardening.conf
 │   └── systemd
@@ -139,7 +141,8 @@ for wakeword detection, the daemon supports two backends:
 - `openwakeword` (default):
   - no access-key signup required
   - local/offline inference at runtime
-  - bootstrap pins `hey_jarvis` by default when no custom model path is set
+  - supports repo-staged models under `files/wakeword/openwakeword/`
+  - bootstrap selects repo-staged models first (prefers `.tflite`), then falls back to `hey_jarvis` prefetch when no model is selected
   - can use custom model paths
   - usually higher cpu usage than porcupine on raspberry pi
 - `porcupine` (`pvporcupine`):
@@ -175,6 +178,7 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - `/run/kai-edge/status.json`: daemon runtime status artifact (when enabled)
 - `/var/lib/kai`: service state
 - `/var/lib/kai/wakeword/openwakeword`: bootstrap-managed openwakeword model cache
+- `/var/lib/kai/wakeword/openwakeword/custom`: repo-staged openwakeword model files synced by bootstrap
 - `/var/log/kai`: optional file-log location for edge components
 - `/etc/ssh/sshd_config.d/60-kai-hardening.conf`: conservative ssh hardening
 
@@ -193,7 +197,9 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - syncs runtime python dependencies into the managed venv (when `CREATE_VENV=1`)
 - configures repo-local git identity in the bootstrap checkout from `GIT_USER_NAME` and `GIT_USER_EMAIL`
 - enforces kai rollout git flow (configurable): keeps local `main` fast-forwarded to `origin/main`, ensures a `kai-local` branch exists, commits local `config.env` overrides on `kai-local`, rebases `kai-local` on local `main`, and leaves the checkout on `kai-local`
-- prefetches and pins an openwakeword `hey_jarvis` model when openwakeword is available and no custom openwakeword model path is configured
+- syncs repo-staged openwakeword model files from `files/wakeword/openwakeword/` into `/var/lib/kai/wakeword/openwakeword/custom/`
+- selects an openwakeword repo model when available (prefers `.tflite` unless `KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL` is set)
+- prefetches and pins an openwakeword `hey_jarvis` model only when no openwakeword model path is set
 - ensures runtime user is in the `audio` group
 - installs managed ssh hardening and validates `sshd -t`
 - optionally enables `avahi-daemon` for `kai.local`
@@ -268,8 +274,9 @@ wakeword keys:
 - `KAI_WAKEWORD_KEYWORD_PATH` (optional absolute path to `.ppn`)
 - `KAI_WAKEWORD_MODEL_PATH` (optional absolute path to `.pv`)
 - `KAI_WAKEWORD_SENSITIVITY` (`0.0` to `1.0`)
+- `KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL` (optional filename from `files/wakeword/openwakeword/`, `.tflite` or `.onnx`)
 - `KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS` (optional comma-separated absolute model paths)
-- if blank, bootstrap tries to pin `hey_jarvis` automatically under `/var/lib/kai/wakeword/openwakeword/`
+- if blank, bootstrap first tries repo-staged models under `/var/lib/kai/wakeword/openwakeword/custom/`, then tries `hey_jarvis` prefetch under `/var/lib/kai/wakeword/openwakeword/`
 - `KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD` (`0.0` to `1.0`)
 - `KAI_WAKEWORD_DETECTION_COOLDOWN_MS`
 - `KAI_WAKEWORD_POST_WAKE_SPEECH_TIMEOUT_MS`
@@ -303,7 +310,8 @@ observability keys:
    - set `KAI_AUDIO_SAMPLE_RATE="16000"`
    - choose `KAI_WAKEWORD_BACKEND`
    - if backend is `porcupine`, set `KAI_WAKEWORD_ACCESS_KEY` and keyword source (`KAI_WAKEWORD_BUILTIN_KEYWORD` or `KAI_WAKEWORD_KEYWORD_PATH`)
-   - if backend is `openwakeword`, leave `KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS` blank to use bootstrap-pinned `hey_jarvis`, or set your own model path(s)
+   - if backend is `openwakeword`, either set `KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL` to a filename in `files/wakeword/openwakeword/`, or set `KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS` to absolute path(s)
+   - if both are blank, bootstrap auto-selects a repo-staged model (prefers `.tflite`), then falls back to `hey_jarvis` prefetch
    - tune `KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD` as needed
 3. rerun bootstrap:
 

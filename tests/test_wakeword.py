@@ -130,10 +130,52 @@ class WakeWordBuilderTests(unittest.TestCase):
         detector.close()
         self.assertEqual(
             FakeOpenWakeWordModel.last_kwargs,
-            {"wakeword_models": ["/opt/kai/models/a.onnx", "/opt/kai/models/b.onnx"]},
+            {
+                "wakeword_models": ["/opt/kai/models/a.onnx", "/opt/kai/models/b.onnx"],
+                "inference_framework": "onnx",
+            },
         )
         self.assertIsNotNone(FakeOpenWakeWordModel.last_instance)
         self.assertTrue(FakeOpenWakeWordModel.last_instance.closed)
+
+    def test_build_wakeword_detector_sets_tflite_framework_for_tflite_paths(self) -> None:
+        logger = logging.getLogger("test-wakeword-openwakeword-tflite")
+        config = build_edge_config(
+            file_settings={
+                "KAI_TRIGGER_MODE": "wakeword",
+                "KAI_WAKEWORD_BACKEND": "openwakeword",
+                "KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS": "/opt/kai/models/kai.tflite",
+                "KAI_OBS_STATUS_FILE_ENABLED": "0",
+            }
+        )
+
+        openwakeword_module = types.ModuleType("openwakeword")
+        openwakeword_model_module = types.ModuleType("openwakeword.model")
+        openwakeword_model_module.Model = FakeOpenWakeWordModel
+        openwakeword_module.model = openwakeword_model_module
+        numpy_module = types.ModuleType("numpy")
+        numpy_module.int16 = FakeNumpyModule.int16
+        numpy_module.frombuffer = FakeNumpyModule.frombuffer
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "openwakeword": openwakeword_module,
+                "openwakeword.model": openwakeword_model_module,
+                "numpy": numpy_module,
+            },
+            clear=False,
+        ):
+            detector = build_wakeword_detector(config=config, logger=logger)
+
+        detector.close()
+        self.assertEqual(
+            FakeOpenWakeWordModel.last_kwargs,
+            {
+                "wakeword_models": ["/opt/kai/models/kai.tflite"],
+                "inference_framework": "tflite",
+            },
+        )
 
 
 if __name__ == "__main__":

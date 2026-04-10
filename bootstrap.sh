@@ -106,6 +106,7 @@ load_config() {
   : "${KAI_WAKEWORD_KEYWORD_PATH:=}"
   : "${KAI_WAKEWORD_MODEL_PATH:=}"
   : "${KAI_WAKEWORD_SENSITIVITY:=0.5}"
+  : "${KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL:=}"
   : "${KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS:=}"
   : "${KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD:=0.5}"
   : "${KAI_WAKEWORD_DETECTION_COOLDOWN_MS:=1500}"
@@ -177,6 +178,18 @@ load_config() {
     die "KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD must be a float between 0 and 1"
   awk -v value="$KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD" 'BEGIN { exit !(value >= 0 && value <= 1) }' || \
     die "KAI_WAKEWORD_OPENWAKEWORD_THRESHOLD must be between 0 and 1"
+  if [[ -n "$KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL" ]]; then
+    if [[ "$KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL" == */* ]]; then
+      die "KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL must be a filename, not a path"
+    fi
+    case "$KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL" in
+      *.tflite|*.onnx)
+        ;;
+      *)
+        die "KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL must end with .tflite or .onnx"
+        ;;
+    esac
+  fi
 
   if [[ -n "$KAI_WAKEWORD_KEYWORD_PATH" ]] && [[ "$KAI_WAKEWORD_KEYWORD_PATH" != /* ]]; then
     die "KAI_WAKEWORD_KEYWORD_PATH must be absolute when set"
@@ -1213,7 +1226,71 @@ ensure_kai_local_git_flow() {
 ensure_openwakeword_default_model() {
   local venv_python="$VENV_DIR/bin/python"
   local model_dir="$KAI_STATE_DIR/wakeword/openwakeword"
+  local custom_model_dir="$model_dir/custom"
+  local repo_model_dir="$SCRIPT_DIR/files/wakeword/openwakeword"
   local model_path=""
+  local selected_repo_model_path=""
+  local src_model_path=""
+  local dest_model_path=""
+  local candidate_model_path=""
+  local -a synced_model_paths=()
+
+  ensure_dir "$model_dir" 0755 "$KAI_USER" "$KAI_GROUP"
+  ensure_dir "$custom_model_dir" 0755 "$KAI_USER" "$KAI_GROUP"
+
+  if [[ -d "$repo_model_dir" ]]; then
+    while IFS= read -r -d '' src_model_path; do
+      case "$src_model_path" in
+        *.tflite|*.onnx)
+          dest_model_path="$custom_model_dir/$(basename "$src_model_path")"
+          if [[ -f "$dest_model_path" ]] && cmp -s "$src_model_path" "$dest_model_path"; then
+            :
+          else
+            install -m 0644 -o "$KAI_USER" -g "$KAI_GROUP" "$src_model_path" "$dest_model_path"
+            note_change "synced openwakeword repo model: $dest_model_path"
+          fi
+          synced_model_paths+=("$dest_model_path")
+          ;;
+        *)
+          note_status "ignoring unsupported openwakeword repo artifact: $(basename "$src_model_path")"
+          ;;
+      esac
+    done < <(find "$repo_model_dir" -maxdepth 1 -type f -print0 | sort -z)
+  fi
+
+  if [[ -n "$KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL" ]]; then
+    selected_repo_model_path="$custom_model_dir/$KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL"
+    if [[ ! -f "$selected_repo_model_path" ]]; then
+      die "KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL not found in $repo_model_dir: $KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL"
+    fi
+    if [[ -z "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS" ]]; then
+      KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS="$selected_repo_model_path"
+      note_change "selected openwakeword repo model: $selected_repo_model_path"
+    else
+      note_status "KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS is set; ignoring KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL"
+    fi
+  fi
+
+  if [[ -z "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS" ]] && [[ ${#synced_model_paths[@]} -gt 0 ]]; then
+    for candidate_model_path in "${synced_model_paths[@]}"; do
+      if [[ "$candidate_model_path" == *.tflite ]]; then
+        selected_repo_model_path="$candidate_model_path"
+        break
+      fi
+    done
+    if [[ -z "$selected_repo_model_path" ]]; then
+      selected_repo_model_path="${synced_model_paths[0]}"
+    fi
+
+    KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS="$selected_repo_model_path"
+    note_change "selected openwakeword repo model: $selected_repo_model_path"
+    note_status "openwakeword repo model auto-selected (preferring .tflite)"
+  fi
+
+  if [[ -n "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS" ]]; then
+    note_status "openwakeword model path(s): $KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS"
+    return 0
+  fi
 
   if [[ "$CREATE_VENV" != "1" ]]; then
     note_status "openwakeword model prefetch skipped (CREATE_VENV=0)"
@@ -1229,8 +1306,6 @@ ensure_openwakeword_default_model() {
     note_status "openwakeword model prefetch skipped (openwakeword dependency unavailable)"
     return 0
   fi
-
-  ensure_dir "$model_dir" 0755 "$KAI_USER" "$KAI_GROUP"
 
   if ! model_path="$(
     runuser -u "$KAI_USER" -- env KAI_OPENWAKEWORD_MODEL_DIR="$model_dir" "$venv_python" - <<'PY'
@@ -1306,7 +1381,7 @@ PY
     return 0
   fi
 
-  note_status "openwakeword model path(s) provided in config.env; leaving configured value unchanged"
+  note_status "openwakeword model path(s): $KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS"
 }
 
 ensure_runtime_user_access() {
@@ -1650,12 +1725,15 @@ prepare_manual_follow_up() {
   elif [[ "$KAI_TRIGGER_MODE" == "wakeword" ]]; then
     note_status "wakeword backend configured: $KAI_WAKEWORD_BACKEND"
     if [[ "$KAI_WAKEWORD_BACKEND" == "openwakeword" ]]; then
+      if [[ -n "$KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL" ]]; then
+        note_status "openwakeword repo model selector: $KAI_WAKEWORD_OPENWAKEWORD_REPO_MODEL"
+      fi
       if [[ -n "$KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS" ]]; then
         note_status "openwakeword model path(s): $KAI_WAKEWORD_OPENWAKEWORD_MODEL_PATHS"
       else
         note_status "openwakeword using backend defaults (no explicit model paths configured)"
       fi
-      note_status "openwakeword wake phrase target: hey jarvis"
+      note_status "openwakeword wake phrase target is defined by the selected model file(s)"
     fi
     note_manual "wakeword mode keeps passive listening armed; use the physical mute switch when not actively testing"
     note_manual "validate wakeword flow end-to-end with: sudo journalctl -u kai-edge.service -f and $EDGE_STATUS_DEST"

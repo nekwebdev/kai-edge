@@ -113,20 +113,49 @@ def _coerce_openwakeword_score(value: Any) -> float | None:
 
 
 def _create_openwakeword_engine(*, model_class: Any, model_paths: tuple[str, ...]) -> Any:
+    def infer_framework() -> str | None:
+        if not model_paths:
+            return None
+
+        frameworks: set[str] = set()
+        for path in model_paths:
+            lowered = path.lower()
+            if lowered.endswith(".tflite"):
+                frameworks.add("tflite")
+            elif lowered.endswith(".onnx"):
+                frameworks.add("onnx")
+            else:
+                return None
+
+        if len(frameworks) == 1:
+            return next(iter(frameworks))
+        return None
+
     if model_paths:
         list_paths = list(model_paths)
-        candidate_kwargs: list[dict[str, Any]] = [
+        base_candidate_kwargs: list[dict[str, Any]] = [
             {"wakeword_models": list_paths},
             {"model_paths": list_paths},
             {"wakeword_model_paths": list_paths},
         ]
         if len(list_paths) == 1:
-            candidate_kwargs.extend(
+            base_candidate_kwargs.extend(
                 (
                     {"model_path": list_paths[0]},
                     {"wakeword_model_path": list_paths[0]},
                 )
             )
+        inferred_framework = infer_framework()
+        candidate_kwargs = []
+        for kwargs in base_candidate_kwargs:
+            if inferred_framework is not None:
+                candidate_kwargs.append(
+                    {
+                        **kwargs,
+                        "inference_framework": inferred_framework,
+                    }
+                )
+            candidate_kwargs.append(kwargs)
     else:
         candidate_kwargs = [{}]
 

@@ -187,11 +187,13 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 `bootstrap.sh` is intentionally simple and reproducible:
 
 - runs `apt-get update`
-- installs baseline packages
+- installs baseline packages (including `ripgrep` / `rg`)
 - installs tailscale with the official linux install script when it is missing
 - ensures `tailscaled` is enabled and running
 - checks tailscale auth/ssh state and prints manual follow-up when needed
 - installs and manages raspap by default (configurable via `INSTALL_RASPAP`)
+- ensures `/etc/raspap/hostapd.ini` exists so raspap networking pages parse cleanly
+- applies a compatibility patch for older raspap builds that reject `wpa_cli` network id `0` on wifi add/connect
 - creates base directories
 - optionally creates a python venv
 - syncs runtime python dependencies into the managed venv (when `CREATE_VENV=1`)

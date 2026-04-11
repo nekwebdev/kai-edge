@@ -409,6 +409,7 @@ ensure_packages() {
     curl
     vim
     htop
+    ripgrep
     jq
     ffmpeg
     python3
@@ -565,6 +566,60 @@ install_raspap_if_requested() {
   die "raspap installation failed"
 }
 
+ensure_raspap_hostapd_ini_if_missing() {
+  local hostapd_ini="/etc/raspap/hostapd.ini"
+  local rendered_hostapd_ini="$TMP_DIR/raspap-hostapd.ini"
+
+  if [[ "$INSTALL_RASPAP" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -f "$hostapd_ini" ]]; then
+    return 0
+  fi
+
+  {
+    printf '%s\n' 'WifiInterface=wlan0'
+    printf '%s\n' 'LogEnable=0'
+    printf '%s\n' 'WifiAPEnable=0'
+    printf '%s\n' 'BridgedEnable=0'
+    printf '%s\n' 'RepeaterEnable=0'
+    printf '%s\n' 'DualAPEnable=0'
+    printf '%s\n' 'WifiManaged=wlan0'
+  } > "$rendered_hostapd_ini"
+
+  install -m 0644 -o root -g root "$rendered_hostapd_ini" "$hostapd_ini"
+  note_change "created missing raspap hostapd.ini defaults"
+}
+
+patch_raspap_wifimanager_zero_netid_bug_if_needed() {
+  local wifi_manager_file="/var/www/html/src/RaspAP/Networking/Hotspot/WiFiManager.php"
+
+  if [[ "$INSTALL_RASPAP" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "$wifi_manager_file" ]]; then
+    warn "raspap WiFiManager.php not found; skipped network-id validation patch"
+    note_manual "if wifi joins fail in raspap with 'Invalid network ID returned: 0', patch $wifi_manager_file manually"
+    return 0
+  fi
+
+  if grep -Fq 'if ($netid === "" || !is_numeric($netid)) {' "$wifi_manager_file"; then
+    return 0
+  fi
+
+  if grep -Fq 'if (!$netid || !is_numeric($netid)) {' "$wifi_manager_file"; then
+    sed -i 's|if (!$netid || !is_numeric($netid)) {|if ($netid === "" || !is_numeric($netid)) {|' "$wifi_manager_file"
+    note_change "patched raspap WiFiManager to allow wpa_cli network id 0"
+    return 0
+  fi
+
+  warn "could not locate expected network-id validation snippet in raspap WiFiManager.php"
+  note_manual "inspect $wifi_manager_file if wifi joins fail from raspap web ui"
+  return 0
+}
+
 configure_raspap_if_requested() {
   local ap_ip ap_prefix ap_mask
   local dhcpcd_block_file="$TMP_DIR/raspap-wlan0-dhcpcd.block"
@@ -582,6 +637,9 @@ configure_raspap_if_requested() {
   [[ -f /etc/dnsmasq.d/090_wlan0.conf ]] || die "raspap dnsmasq config missing: /etc/dnsmasq.d/090_wlan0.conf"
   [[ -f /etc/dhcpcd.conf ]] || die "raspap dhcpcd config missing: /etc/dhcpcd.conf"
   [[ -d /etc/raspap ]] || die "raspap config directory missing: /etc/raspap"
+
+  ensure_raspap_hostapd_ini_if_missing
+  patch_raspap_wifimanager_zero_netid_bug_if_needed
 
   [[ ${#RASPAP_AP_SSID} -gt 0 ]] || die "RASPAP_AP_SSID must not be empty"
   [[ ${#RASPAP_AP_PASSPHRASE} -ge 8 ]] || die "RASPAP_AP_PASSPHRASE must be at least 8 characters"
@@ -604,13 +662,14 @@ configure_raspap_if_requested() {
   {
     printf '%s\n' '# RaspAP wlan0 configuration'
     printf '%s\n' 'interface wlan0'
-    printf 'static ip_address=%s\n' "$RASPAP_AP_SUBNET_CIDR"
-    printf 'static domain_name_servers=%s\n' "$RASPAP_AP_DNS_SERVERS"
     if [[ "$RASPAP_ENABLE_FALLBACK_AP" == "1" ]]; then
-      printf '%s\n' 'profile static_wlan0'
       printf '%s\n' 'fallback static_wlan0'
+      printf '\n'
+      printf '%s\n' 'profile static_wlan0'
+      printf 'static ip_address=%s\n' "$RASPAP_AP_SUBNET_CIDR"
+      printf 'static domain_name_servers=%s\n' "$RASPAP_AP_DNS_SERVERS"
+      printf '%s\n' 'nogateway'
     fi
-    printf '%s\n' 'nogateway'
   } > "$dhcpcd_block_file"
   replace_raspap_dhcpcd_wlan0_block /etc/dhcpcd.conf "$dhcpcd_block_file" "$rendered_dhcpcd"
   install -m 0644 -o root -g root "$rendered_dhcpcd" /etc/dhcpcd.conf

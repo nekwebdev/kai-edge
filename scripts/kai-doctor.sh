@@ -155,6 +155,7 @@ check_required_directories() {
 
 check_required_commands() {
   check_command tailscale
+  check_command rg
   check_command jq
   check_command ffmpeg
   check_command python3
@@ -780,6 +781,7 @@ check_avahi_state() {
 
 check_raspap_state() {
   local enabled_state ap_ip
+  local interface_line fallback_line profile_line
   local expected_fallback=0
 
   if [[ "$INSTALL_RASPAP" != "1" ]]; then
@@ -824,6 +826,24 @@ check_raspap_state() {
     fail "hostapd config missing: /etc/hostapd/hostapd.conf"
   fi
 
+  if [[ -f /etc/raspap/hostapd.ini ]]; then
+    ok "raspap hostapd ini present: /etc/raspap/hostapd.ini"
+  else
+    fail "raspap hostapd ini missing: /etc/raspap/hostapd.ini"
+  fi
+
+  if [[ -f /var/www/html/src/RaspAP/Networking/Hotspot/WiFiManager.php ]]; then
+    if grep -Fq 'if ($netid === "" || !is_numeric($netid)) {' /var/www/html/src/RaspAP/Networking/Hotspot/WiFiManager.php; then
+      ok "raspap WiFiManager network id validation allows id 0"
+    elif grep -Fq 'if (!$netid || !is_numeric($netid)) {' /var/www/html/src/RaspAP/Networking/Hotspot/WiFiManager.php; then
+      fail "raspap WiFiManager network id validation still rejects id 0; wifi add/connect can fail for first saved network"
+    else
+      warn "raspap WiFiManager network id validation snippet not recognized"
+    fi
+  else
+    warn "raspap WiFiManager.php not found; skipped network id validation check"
+  fi
+
   if [[ -f /etc/dnsmasq.d/090_wlan0.conf ]]; then
     if grep -Fqx "dhcp-range=${RASPAP_AP_DHCP_RANGE}" /etc/dnsmasq.d/090_wlan0.conf; then
       ok "raspap AP DHCP range configured"
@@ -836,11 +856,6 @@ check_raspap_state() {
 
   if [[ -f /etc/dhcpcd.conf ]]; then
     ap_ip="${RASPAP_AP_SUBNET_CIDR%/*}"
-    if grep -Fqx "static ip_address=${RASPAP_AP_SUBNET_CIDR}" /etc/dhcpcd.conf; then
-      ok "raspap AP static subnet configured: $RASPAP_AP_SUBNET_CIDR"
-    else
-      fail "raspap AP static subnet does not match expected value: $RASPAP_AP_SUBNET_CIDR"
-    fi
 
     if [[ -n "$ap_ip" ]] && grep -Fqx "static routers=${ap_ip}" /etc/dhcpcd.conf; then
       fail "raspap dhcpcd config still sets static routers to AP self IP ($ap_ip), which can hijack default routing"
@@ -850,10 +865,33 @@ check_raspap_state() {
 
     if [[ "$RASPAP_ENABLE_FALLBACK_AP" == "1" ]]; then
       expected_fallback=1
+
+      if grep -Fqx "static ip_address=${RASPAP_AP_SUBNET_CIDR}" /etc/dhcpcd.conf; then
+        ok "raspap AP static subnet configured: $RASPAP_AP_SUBNET_CIDR"
+      else
+        fail "raspap AP static subnet does not match expected value: $RASPAP_AP_SUBNET_CIDR"
+      fi
+
       if grep -Fqx "fallback static_wlan0" /etc/dhcpcd.conf; then
         ok "raspap fallback AP behavior enabled for wlan0"
       else
         fail "raspap fallback AP behavior expected but not configured for wlan0"
+      fi
+
+      interface_line="$(grep -n "^interface wlan0$" /etc/dhcpcd.conf | head -n 1 | cut -d: -f1 || true)"
+      fallback_line="$(grep -n "^fallback static_wlan0$" /etc/dhcpcd.conf | head -n 1 | cut -d: -f1 || true)"
+      profile_line="$(grep -n "^profile static_wlan0$" /etc/dhcpcd.conf | head -n 1 | cut -d: -f1 || true)"
+      if [[ -n "$interface_line" && -n "$fallback_line" && -n "$profile_line" ]] && \
+         (( interface_line < fallback_line && fallback_line < profile_line )); then
+        ok "raspap fallback block ordering in dhcpcd.conf is valid"
+      else
+        fail "raspap fallback block ordering in dhcpcd.conf is invalid; expected interface wlan0 -> fallback static_wlan0 -> profile static_wlan0"
+      fi
+    else
+      if grep -Fqx "static ip_address=${RASPAP_AP_SUBNET_CIDR}" /etc/dhcpcd.conf; then
+        warn "raspap AP static subnet is configured in dhcpcd.conf while fallback AP is disabled in bootstrap config"
+      else
+        ok "raspap AP static subnet not configured in dhcpcd.conf (fallback AP disabled)"
       fi
     fi
 

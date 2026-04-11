@@ -610,7 +610,7 @@ patch_raspap_wifimanager_zero_netid_bug_if_needed() {
   fi
 
   if grep -Fq 'if (!$netid || !is_numeric($netid)) {' "$wifi_manager_file"; then
-    sed -i 's|if (!$netid || !is_numeric($netid)) {|if ($netid === "" || !is_numeric($netid)) {|' "$wifi_manager_file"
+    sed -i 's#if (!$netid || !is_numeric($netid)) {#if ($netid === "" || !is_numeric($netid)) {#' "$wifi_manager_file"
     note_change "patched raspap WiFiManager to allow wpa_cli network id 0"
     return 0
   fi

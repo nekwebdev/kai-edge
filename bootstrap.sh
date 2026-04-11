@@ -94,6 +94,7 @@ load_config() {
   : "${KAI_GIT_REMOTE:=origin}"
   : "${KAI_GIT_MAIN_BRANCH:=main}"
   : "${KAI_GIT_LOCAL_BRANCH:=kai-local}"
+  : "${KAI_TAILSCALE_ACCEPT_DNS:=1}"
   : "${KAI_CORE_BASE_URL:=}"
   : "${KAI_RECORD_SECONDS:=5}"
   : "${KAI_AUDIO_SAMPLE_RATE:=16000}"
@@ -155,6 +156,14 @@ load_config() {
       ;;
     *)
       die "KAI_GIT_ENSURE_KAI_LOCAL_FLOW must be 0 or 1"
+      ;;
+  esac
+
+  case "$KAI_TAILSCALE_ACCEPT_DNS" in
+    0|1)
+      ;;
+    *)
+      die "KAI_TAILSCALE_ACCEPT_DNS must be 0 or 1"
       ;;
   esac
 
@@ -818,6 +827,11 @@ check_tailscale_state() {
 
   case "$backend_state" in
     Running|Starting)
+      if [[ "$KAI_TAILSCALE_ACCEPT_DNS" == "1" ]]; then
+        note_status "tailscale DNS acceptance policy enabled (tailnet hostnames should resolve)"
+      else
+        note_status "tailscale DNS acceptance policy disabled in config.env"
+      fi
       case "$ssh_enabled" in
         true)
           note_status "tailscale is healthy and ssh is enabled"
@@ -872,6 +886,74 @@ get_tailscale_ssh_enabled() {
     *)
       warn "tailscale debug prefs did not return a usable RunSSH value"
       printf 'unknown\n'
+      ;;
+  esac
+}
+
+get_tailscale_dns_enabled() {
+  local prefs_json corp_dns
+
+  if ! prefs_json="$(tailscale debug prefs 2>/dev/null)"; then
+    warn "could not read tailscale debug prefs"
+    printf 'unknown\n'
+    return 0
+  fi
+
+  corp_dns="$(jq -r '.CorpDNS // "unknown"' <<<"$prefs_json")"
+  case "$corp_dns" in
+    true|false)
+      printf '%s\n' "$corp_dns"
+      ;;
+    *)
+      warn "tailscale debug prefs did not return a usable CorpDNS value"
+      printf 'unknown\n'
+      ;;
+  esac
+}
+
+ensure_tailscale_dns_if_requested() {
+  local status_json backend_state dns_enabled
+
+  if [[ "$KAI_TAILSCALE_ACCEPT_DNS" != "1" ]]; then
+    return 0
+  fi
+
+  if ! status_json="$(tailscale status --json 2>/dev/null)"; then
+    warn "could not read tailscale status while checking DNS preference"
+    note_manual "enable tailscale DNS acceptance manually with: sudo tailscale set --accept-dns=true"
+    return 0
+  fi
+
+  backend_state="$(jq -r '.BackendState // ""' <<<"$status_json")"
+  case "$backend_state" in
+    Running|Starting)
+      ;;
+    *)
+      note_status "tailscale DNS acceptance not enforced because backend state is ${backend_state:-unknown}"
+      return 0
+      ;;
+  esac
+
+  dns_enabled="$(get_tailscale_dns_enabled)"
+  case "$dns_enabled" in
+    true)
+      log "tailscale DNS acceptance already enabled"
+      return 0
+      ;;
+    false)
+      log "enabling tailscale DNS acceptance for tailnet hostname resolution"
+      if tailscale set --accept-dns=true; then
+        note_change "enabled tailscale DNS acceptance (--accept-dns=true)"
+        return 0
+      fi
+      warn "could not enable tailscale DNS acceptance automatically"
+      note_manual "enable tailscale DNS acceptance manually with: sudo tailscale set --accept-dns=true"
+      return 1
+      ;;
+    *)
+      warn "could not determine tailscale DNS acceptance state"
+      note_manual "inspect tailscale DNS state manually with: sudo tailscale debug prefs | jq '.CorpDNS'"
+      return 0
       ;;
   esac
 }
@@ -1715,6 +1797,7 @@ render_doctor_config() {
     printf 'CREATE_VENV=%q\n' "$CREATE_VENV"
     printf 'INSTALL_AVAHI=%q\n' "$INSTALL_AVAHI"
     printf 'INSTALL_RASPAP=%q\n' "$INSTALL_RASPAP"
+    printf 'KAI_TAILSCALE_ACCEPT_DNS=%q\n' "$KAI_TAILSCALE_ACCEPT_DNS"
     printf 'RASPAP_INSTALL_URL=%q\n' "$RASPAP_INSTALL_URL"
     printf 'RASPAP_AP_SSID=%q\n' "$RASPAP_AP_SSID"
     printf 'RASPAP_AP_SUBNET_CIDR=%q\n' "$RASPAP_AP_SUBNET_CIDR"
@@ -1879,6 +1962,7 @@ main() {
   ensure_raspap_service_if_requested || true
   install_tailscale_if_missing
   if ensure_tailscaled_service; then
+    ensure_tailscale_dns_if_requested || true
     check_tailscale_state
   fi
   ensure_base_directories

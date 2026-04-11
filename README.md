@@ -190,6 +190,7 @@ bootstrap now syncs runtime python dependencies from `requirements-runtime.txt` 
 - installs baseline packages (including `ripgrep` / `rg`)
 - installs tailscale with the official linux install script when it is missing
 - ensures `tailscaled` is enabled and running
+- enforces tailscale DNS acceptance (`--accept-dns=true`) when `KAI_TAILSCALE_ACCEPT_DNS="1"` so tailnet hostnames (for example `lotus`) resolve reliably
 - checks tailscale auth/ssh state and prints manual follow-up when needed
 - installs and manages raspap by default (configurable via `INSTALL_RASPAP`)
 - ensures `/etc/raspap/hostapd.ini` exists so raspap networking pages parse cleanly
@@ -230,6 +231,10 @@ git rollout flow keys in `config.env`:
 - on reruns, bootstrap allows one dirty case: `kai-local` has local `config.env` edits; branch sync is skipped for that run so config changes can be iterated without committing yet
 - bootstrap still exits with an error for dirty non-`config.env` paths
 - update flow is `main` fast-forward from `origin/main`, then `kai-local` rebase onto local `main`
+
+tailscale key in `config.env`:
+
+- `KAI_TAILSCALE_ACCEPT_DNS` (`1` default): when enabled, bootstrap sets `tailscale --accept-dns=true` so tailnet hostnames resolve on the node
 
 ## service enable default
 
@@ -456,6 +461,7 @@ sudo /opt/kai/bin/kai-doctor
 - installed runtime files (`kai_edge` package, daemon/trigger/status/one-shot helpers, env file)
 - ssh config validity
 - tailscale state and tailscale ssh state
+- tailscale DNS acceptance state (`CorpDNS`) against bootstrap policy
 - avahi state when enabled
 - raspap state when enabled
 - real `kai-edge.service` unit shape (not placeholder)

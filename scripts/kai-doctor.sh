@@ -15,6 +15,7 @@ KAI_VENV_DIR="/opt/kai/venv"
 CREATE_VENV="1"
 INSTALL_AVAHI="1"
 INSTALL_RASPAP="1"
+KAI_TAILSCALE_ACCEPT_DNS="1"
 RASPAP_INSTALL_URL="https://install.raspap.com"
 RASPAP_AP_SSID="Kai-Setup"
 RASPAP_AP_SUBNET_CIDR="10.42.0.1/24"
@@ -686,7 +687,7 @@ check_ssh_state() {
 }
 
 check_tailscale_state() {
-  local status_json backend_state prefs_json run_ssh
+  local status_json backend_state prefs_json run_ssh corp_dns
 
   if ! have_command systemctl; then
     warn "skipping tailscaled service check because systemctl is unavailable"
@@ -747,6 +748,31 @@ check_tailscale_state() {
       ;;
     *)
       warn "tailscale ssh state unknown"
+      ;;
+  esac
+
+  corp_dns="$(jq -r '.CorpDNS // "unknown"' <<<"$prefs_json")"
+  case "$KAI_TAILSCALE_ACCEPT_DNS:$corp_dns" in
+    1:true)
+      ok "tailscale DNS acceptance enabled (tailnet hostnames should resolve)"
+      ;;
+    1:false)
+      fail "tailscale DNS acceptance is disabled (CorpDNS=false); tailnet hostnames like lotus will not resolve"
+      ;;
+    1:*)
+      warn "tailscale DNS acceptance state unknown"
+      ;;
+    0:true)
+      warn "tailscale DNS acceptance is enabled but bootstrap config expects it disabled"
+      ;;
+    0:false)
+      ok "tailscale DNS acceptance disabled by bootstrap config"
+      ;;
+    0:*)
+      warn "tailscale DNS acceptance state unknown"
+      ;;
+    *)
+      warn "invalid KAI_TAILSCALE_ACCEPT_DNS in bootstrap state: $KAI_TAILSCALE_ACCEPT_DNS"
       ;;
   esac
 }

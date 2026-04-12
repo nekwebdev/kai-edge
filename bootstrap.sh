@@ -99,6 +99,8 @@ load_config() {
   : "${KAI_RECORD_SECONDS:=5}"
   : "${KAI_AUDIO_SAMPLE_RATE:=16000}"
   : "${KAI_HTTP_TIMEOUT_SECONDS:=60}"
+  : "${KAI_AUDIO_STREAM_ENABLED:=0}"
+  : "${KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM:=1}"
   : "${KAI_TRIGGER_MODE:=manual}"
   : "${KAI_TRIGGER_SOCKET_PATH:=/run/kai-edge/trigger.sock}"
   : "${KAI_WAKEWORD_BACKEND:=openwakeword}"
@@ -164,6 +166,22 @@ load_config() {
       ;;
     *)
       die "KAI_TAILSCALE_ACCEPT_DNS must be 0 or 1"
+      ;;
+  esac
+
+  case "$KAI_AUDIO_STREAM_ENABLED" in
+    0|1)
+      ;;
+    *)
+      die "KAI_AUDIO_STREAM_ENABLED must be 0 or 1"
+      ;;
+  esac
+
+  case "$KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM" in
+    0|1)
+      ;;
+    *)
+      die "KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM must be 0 or 1"
       ;;
   esac
 
@@ -360,6 +378,8 @@ render_edge_env() {
     -e "s|__KAI_RECORD_SECONDS__|$(escape_sed_replacement "$KAI_RECORD_SECONDS")|g" \
     -e "s|__KAI_AUDIO_SAMPLE_RATE__|$(escape_sed_replacement "$KAI_AUDIO_SAMPLE_RATE")|g" \
     -e "s|__KAI_HTTP_TIMEOUT_SECONDS__|$(escape_sed_replacement "$KAI_HTTP_TIMEOUT_SECONDS")|g" \
+    -e "s|__KAI_AUDIO_STREAM_ENABLED__|$(escape_sed_replacement "$KAI_AUDIO_STREAM_ENABLED")|g" \
+    -e "s|__KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM__|$(escape_sed_replacement "$KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM")|g" \
     -e "s|__KAI_TRIGGER_MODE__|$(escape_sed_replacement "$KAI_TRIGGER_MODE")|g" \
     -e "s|__KAI_TRIGGER_SOCKET_PATH__|$(escape_sed_replacement "$KAI_TRIGGER_SOCKET_PATH")|g" \
     -e "s|__KAI_WAKEWORD_BACKEND__|$(escape_sed_replacement "$KAI_WAKEWORD_BACKEND")|g" \
@@ -1843,7 +1863,7 @@ prepare_manual_follow_up() {
   note_manual "review $SSH_SNIPPET_DEST before making stronger ssh changes that could affect your access path"
   note_manual "run sudo $DOCTOR_HELPER_DEST after bootstrap to validate node readiness"
   note_manual "run $AUDIO_HELPER_DEST after the target microphone and speaker hardware are attached"
-  note_manual "run sudo -u $KAI_USER $PUSH_TO_TALK_DEST for a manual one-shot record -> /audio -> playback test"
+  note_manual "run sudo -u $KAI_USER $PUSH_TO_TALK_DEST for a manual one-shot record -> kai-core audio endpoint -> playback test"
   note_manual "run sudo -u $KAI_USER $EDGE_TRIGGER_DEST to trigger one daemon-managed push-to-talk interaction"
   note_manual "run $EDGE_STATUS_DEST to inspect live daemon state and counters"
   note_manual "inspect service logs with: sudo journalctl -u kai-edge.service -f"
@@ -1859,6 +1879,17 @@ prepare_manual_follow_up() {
     note_manual "set KAI_CORE_BASE_URL in $CONFIG_FILE and rerun bootstrap before using $EDGE_TRIGGER_DEST or $PUSH_TO_TALK_DEST"
   else
     note_status "kai-core base URL configured for push-to-talk: $KAI_CORE_BASE_URL"
+  fi
+
+  if [[ "$KAI_AUDIO_STREAM_ENABLED" == "1" ]]; then
+    note_status "streaming tts path enabled on edge (/audio/stream with chunked playback)"
+    if [[ "$KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM" == "1" ]]; then
+      note_status "streaming fallback enabled: edge will retry /audio if stream fails before playback"
+    else
+      note_status "streaming fallback disabled: edge will fail fast if /audio/stream is unavailable"
+    fi
+  else
+    note_status "streaming tts path disabled on edge (using /audio)"
   fi
 
   note_status "kai-edge trigger mode configured: $KAI_TRIGGER_MODE"

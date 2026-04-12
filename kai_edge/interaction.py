@@ -6,9 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .audio import play_audio, record_audio
+from .audio import StreamingAudioPlayer, play_audio, record_audio
 from .config import EdgeConfig
-from .core_client import CoreResponse, send_audio
+from .core_client import CoreAudio, CoreResponse, send_audio, send_audio_stream
 from .errors import EdgeRuntimeError
 
 
@@ -49,6 +49,24 @@ def send_request_audio(*, config: EdgeConfig, recorded_audio_path: Path, logger:
     )
 
 
+def send_request_audio_streaming(
+    *,
+    config: EdgeConfig,
+    recorded_audio_path: Path,
+    logger: logging.Logger,
+    on_audio_chunk: Callable[[CoreAudio], None],
+) -> tuple[str, str, int]:
+    ensure_backend_url(config)
+    stream_result = send_audio_stream(
+        audio_path=recorded_audio_path,
+        backend_url=config.backend_url,
+        timeout_seconds=config.timeout_seconds,
+        logger=logger,
+        on_audio_chunk=on_audio_chunk,
+    )
+    return stream_result.text, stream_result.response, stream_result.audio_chunks
+
+
 def speak_response_audio(
     *,
     config: EdgeConfig,
@@ -76,6 +94,49 @@ def process_recorded_audio(
     logger: logging.Logger,
     on_before_speak: Callable[[], None] | None = None,
 ) -> InteractionResult:
+    if config.audio_stream_enabled:
+        audio_player = StreamingAudioPlayer(
+            playback_device=config.playback_device,
+            logger=logger,
+        )
+        before_speak_called = False
+        audio_chunks = 0
+
+        def _on_audio_chunk(audio: CoreAudio) -> None:
+            nonlocal before_speak_called, audio_chunks
+            if not before_speak_called and on_before_speak is not None:
+                on_before_speak()
+                before_speak_called = True
+            audio_player.write_chunk(mime_type=audio.mime_type, chunk=audio.data)
+            audio_chunks += 1
+
+        try:
+            text, response, streamed_chunk_count = send_request_audio_streaming(
+                config=config,
+                recorded_audio_path=recorded_audio_path,
+                logger=logger,
+                on_audio_chunk=_on_audio_chunk,
+            )
+            logger.info("transcribed text: %s", text)
+            logger.info("assistant response: %s", response)
+            audio_played = audio_player.close()
+            if streamed_chunk_count == 0:
+                logger.info("backend stream returned no audio chunks")
+            return InteractionResult(
+                text=text,
+                response=response,
+                audio_played=audio_played,
+            )
+        except EdgeRuntimeError as exc:
+            audio_player.abort()
+            if config.audio_stream_fallback_to_non_stream and audio_chunks == 0:
+                logger.warning(
+                    "streaming request failed before playback; falling back to /audio: %s",
+                    exc,
+                )
+            else:
+                raise
+
     core_response = send_request_audio(
         config=config,
         recorded_audio_path=recorded_audio_path,

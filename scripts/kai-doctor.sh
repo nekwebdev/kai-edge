@@ -189,6 +189,7 @@ check_runtime_user() {
 
 check_runtime_files() {
   local backend_url trigger_mode trigger_socket sample_rate
+  local audio_stream_enabled_raw audio_stream_enabled audio_stream_fallback_raw audio_stream_fallback
   local wakeword_backend wakeword_access_key wakeword_builtin_keyword wakeword_keyword_path wakeword_model_path
   local wakeword_sensitivity wakeword_openwakeword_model_paths wakeword_openwakeword_threshold
   local wakeword_cooldown_ms wakeword_speech_timeout_ms openwakeword_model_path
@@ -248,6 +249,46 @@ check_runtime_files() {
   else
     warn "kai-core base URL is blank in $EDGE_ENV_FILE"
   fi
+
+  audio_stream_enabled_raw="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_AUDIO_STREAM_ENABLED:-0}"
+    ) 2>/dev/null || true
+  )"
+  audio_stream_enabled="$(normalize_bool "$audio_stream_enabled_raw")"
+  case "$audio_stream_enabled" in
+    1)
+      ok "streaming tts path enabled on edge (/audio/stream)"
+      ;;
+    0)
+      ok "streaming tts path disabled on edge (using /audio)"
+      ;;
+    *)
+      fail "invalid KAI_AUDIO_STREAM_ENABLED in $EDGE_ENV_FILE: ${audio_stream_enabled_raw:-<blank>}"
+      ;;
+  esac
+
+  audio_stream_fallback_raw="$(
+    (
+      # shellcheck source=/dev/null
+      source "$EDGE_ENV_FILE"
+      printf '%s' "${KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM:-1}"
+    ) 2>/dev/null || true
+  )"
+  audio_stream_fallback="$(normalize_bool "$audio_stream_fallback_raw")"
+  case "$audio_stream_fallback" in
+    1)
+      ok "streaming fallback to /audio is enabled"
+      ;;
+    0)
+      ok "streaming fallback to /audio is disabled"
+      ;;
+    *)
+      fail "invalid KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM in $EDGE_ENV_FILE: ${audio_stream_fallback_raw:-<blank>}"
+      ;;
+  esac
 
   trigger_mode="$(
     (

@@ -12,6 +12,8 @@ DEFAULT_ENV_FILE = "/etc/kai/edge.env"
 DEFAULT_RECORD_SECONDS = 5
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_TIMEOUT_SECONDS = 60
+DEFAULT_AUDIO_STREAM_ENABLED = False
+DEFAULT_AUDIO_STREAM_FALLBACK_TO_NON_STREAM = True
 DEFAULT_TRIGGER_SOCKET_PATH = "/run/kai-edge/trigger.sock"
 DEFAULT_TRIGGER_MODE = "manual"
 VALID_TRIGGER_MODES = ("manual", "vad", "wakeword")
@@ -43,6 +45,8 @@ class EdgeConfig:
     record_seconds: int
     sample_rate: int
     timeout_seconds: int
+    audio_stream_enabled: bool
+    audio_stream_fallback_to_non_stream: bool
     record_device: str | None
     playback_device: str | None
     trigger_socket_path: str
@@ -231,6 +235,10 @@ def build_edge_config(
         "KAI_RECORD_SECONDS": str(DEFAULT_RECORD_SECONDS),
         "KAI_AUDIO_SAMPLE_RATE": str(DEFAULT_SAMPLE_RATE),
         "KAI_HTTP_TIMEOUT_SECONDS": str(DEFAULT_TIMEOUT_SECONDS),
+        "KAI_AUDIO_STREAM_ENABLED": "1" if DEFAULT_AUDIO_STREAM_ENABLED else "0",
+        "KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM": "1"
+        if DEFAULT_AUDIO_STREAM_FALLBACK_TO_NON_STREAM
+        else "0",
         "KAI_RECORD_DEVICE": "",
         "KAI_PLAYBACK_DEVICE": "",
         "KAI_TRIGGER_SOCKET_PATH": DEFAULT_TRIGGER_SOCKET_PATH,
@@ -274,6 +282,19 @@ def build_edge_config(
     timeout_seconds = positive_int(
         _get_setting("KAI_HTTP_TIMEOUT_SECONDS", file_settings, defaults, overrides),
         "KAI_HTTP_TIMEOUT_SECONDS",
+    )
+    audio_stream_enabled = parse_bool(
+        _get_setting("KAI_AUDIO_STREAM_ENABLED", file_settings, defaults, overrides),
+        "KAI_AUDIO_STREAM_ENABLED",
+    )
+    audio_stream_fallback_to_non_stream = parse_bool(
+        _get_setting(
+            "KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM",
+            file_settings,
+            defaults,
+            overrides,
+        ),
+        "KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM",
     )
     record_device = optional_string(
         _get_setting("KAI_RECORD_DEVICE", file_settings, defaults, overrides)
@@ -422,6 +443,8 @@ def build_edge_config(
         record_seconds=record_seconds,
         sample_rate=sample_rate,
         timeout_seconds=timeout_seconds,
+        audio_stream_enabled=audio_stream_enabled,
+        audio_stream_fallback_to_non_stream=audio_stream_fallback_to_non_stream,
         record_device=record_device,
         playback_device=playback_device,
         trigger_socket_path=trigger_socket_path,

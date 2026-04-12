@@ -68,6 +68,8 @@ class ConfigTests(unittest.TestCase):
     def test_build_edge_config_defaults_to_manual_trigger_mode(self) -> None:
         config = build_edge_config(file_settings={})
         self.assertEqual(config.trigger_mode, DEFAULT_TRIGGER_MODE)
+        self.assertFalse(config.audio_stream_enabled)
+        self.assertTrue(config.audio_stream_fallback_to_non_stream)
 
     def test_build_edge_config_accepts_vad_trigger_mode(self) -> None:
         config = build_edge_config(file_settings={"KAI_TRIGGER_MODE": "vad"})
@@ -130,6 +132,16 @@ class ConfigTests(unittest.TestCase):
     def test_build_edge_config_rejects_invalid_observability_bool(self) -> None:
         with self.assertRaises(EdgeConfigError):
             build_edge_config(file_settings={"KAI_OBS_STATUS_FILE_ENABLED": "maybe"})
+
+    def test_build_edge_config_rejects_invalid_audio_stream_enabled_bool(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(file_settings={"KAI_AUDIO_STREAM_ENABLED": "sometimes"})
+
+    def test_build_edge_config_rejects_invalid_audio_stream_fallback_bool(self) -> None:
+        with self.assertRaises(EdgeConfigError):
+            build_edge_config(
+                file_settings={"KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM": "sometimes"}
+            )
 
     def test_build_edge_config_rejects_relative_status_path(self) -> None:
         with self.assertRaises(EdgeConfigError):

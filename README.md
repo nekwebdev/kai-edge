@@ -64,6 +64,7 @@ it does not manage:
 │   ├── test_config.py
 │   ├── test_core_client.py
 │   ├── test_daemon.py
+│   ├── test_interaction.py
 │   ├── test_observability.py
 │   ├── test_vad_session.py
 │   ├── test_wakeword.py
@@ -98,8 +99,8 @@ manual mode is unchanged:
 
 1. daemon waits in `idle` for a local unix socket trigger.
 2. on trigger, daemon records one fixed-duration wav clip.
-3. daemon sends it to `${KAI_CORE_BASE_URL}/audio`.
-4. daemon plays returned audio when present.
+3. daemon sends it to `${KAI_CORE_BASE_URL}/audio` (or `${KAI_CORE_BASE_URL}/audio/stream` when edge streaming is enabled).
+4. daemon plays returned audio when present (streaming playback starts on first audio chunk when enabled).
 5. daemon returns to `idle`.
 
 ### vad mode
@@ -110,8 +111,8 @@ vad mode arms the microphone and loops:
 2. transition to `recording` when speech is detected.
 3. stop on trailing silence or max utterance duration.
 4. reject short/noise bursts below minimum speech duration or speech-run gate.
-5. send accepted wav to `${KAI_CORE_BASE_URL}/audio`.
-6. play returned audio when present.
+5. send accepted wav to `${KAI_CORE_BASE_URL}/audio` (or `${KAI_CORE_BASE_URL}/audio/stream` when edge streaming is enabled).
+6. play returned audio when present (streaming playback starts on first audio chunk when enabled).
 7. return to `idle`, apply cooldown, and re-arm.
 
 ### wakeword mode
@@ -122,8 +123,8 @@ wakeword mode is layered on top of the same VAD/session logic:
 2. when wakeword is detected, start one post-wake utterance capture using the existing VAD collector.
 3. reuse the same VAD gates for speech start, pre-roll, trailing silence stop, max duration stop, and accept/reject thresholds.
 4. if speech does not start before timeout, discard and re-arm wake listening.
-5. send accepted wav to `${KAI_CORE_BASE_URL}/audio`.
-6. play returned audio when present.
+5. send accepted wav to `${KAI_CORE_BASE_URL}/audio` (or `${KAI_CORE_BASE_URL}/audio/stream` when edge streaming is enabled).
+6. play returned audio when present (streaming playback starts on first audio chunk when enabled).
 7. return to `idle`, apply cooldown, and re-arm passive wake listening.
 
 logs include mode selection, arm state, speech start/end, accept/reject reason, sending/speaking/idle transitions, and errors.
@@ -265,6 +266,8 @@ core/runtime keys:
 - `KAI_RECORD_SECONDS`
 - `KAI_AUDIO_SAMPLE_RATE`
 - `KAI_HTTP_TIMEOUT_SECONDS`
+- `KAI_AUDIO_STREAM_ENABLED` (`1` enables `/audio/stream`; default `0`)
+- `KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM` (`1` retries `/audio` only if stream fails before playback starts)
 - `KAI_RECORD_DEVICE`
 - `KAI_PLAYBACK_DEVICE`
 
@@ -331,6 +334,26 @@ sudo ./bootstrap.sh
 ```bash
 sudo systemctl restart kai-edge.service
 ```
+
+## tts streaming toggle
+
+if your `kai-core` has `POST /audio/stream` enabled, you can reduce first-audio latency on edge:
+
+1. set in `config.env`:
+
+```bash
+KAI_AUDIO_STREAM_ENABLED="1"
+KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM="1"
+```
+
+2. rerun bootstrap and restart:
+
+```bash
+sudo ./bootstrap.sh
+sudo systemctl restart kai-edge.service
+```
+
+when fallback is enabled, edge retries classic `/audio` only if stream setup fails before playback starts.
 
 ## service operations
 
@@ -468,6 +491,7 @@ sudo /opt/kai/bin/kai-doctor
 - journald routing for service stdout/stderr
 - service state expectations based on `ENABLE_KAI_EDGE_SERVICE`
 - mode-aware runtime checks for `manual`, `vad`, and `wakeword`
+- streaming tts env shape checks (`KAI_AUDIO_STREAM_ENABLED`, `KAI_AUDIO_STREAM_FALLBACK_TO_NON_STREAM`)
 - trigger socket expectations when service is active
 - VAD config shape checks when `KAI_TRIGGER_MODE=vad` or `wakeword`
 - wakeword config and model/keyword path checks when `KAI_TRIGGER_MODE=wakeword`
@@ -490,7 +514,7 @@ exit status:
 
 this runtime intentionally does **not** include:
 
-- streaming stt/tts
+- streaming stt
 - conversation memory on the edge
 - multi-turn dialogue orchestration on the edge
 - interruption/barge-in during playback
